@@ -1,0 +1,823 @@
+---
+title: "Zloxer：Rust 实现的 Lox 语言解释器"
+description: "基于《Crafting Interpreters》用 Rust 实现的 Lox 语言解释器，包含词法分析、语法分析、AST 解释和面向对象特性"
+tags:
+  - rust
+  - lox
+  - 解释器
+  - ast
+  - 编译原理
+---
+
+import { Steps } from "@astrojs/starlight/components";
+
+## 概述
+
+Zloxer 是一个用 Rust 语言实现的 Lox 解释器，灵感来源于 [Crafting Interpreters](https://craftinginterpreters.com/) 这本经典书籍。Lox 是一个小型的动态类型编程语言，支持函数、类、闭包、继承等现代语言特性。
+
+项目地址：https://github.com/zooeywm/zloxer
+
+### 项目特点
+
+| 特性                   | 说明                                 |
+| ---------------------- | ------------------------------------ |
+| **手写递归下降解析器** | 使用 EBNF 语法定义实现清晰的语法分析 |
+| **AST 树遍历解释器**   | 直接执行抽象语法树，无需中间表示     |
+| **词法作用域**         | 支持闭包和嵌套函数                   |
+| **面向对象**           | 支持类、继承、方法调用               |
+| **错误恢复机制**       | 解析错误后能继续分析后续代码         |
+| **REPL 支持**          | 交互式解释器模式                     |
+
+## 构建和运行
+
+```bash
+# 克隆仓库
+git clone https://github.com/zooeywm/zloxer
+cd zloxer
+
+# 运行测试
+cargo test
+
+# 查看 Rust 文档
+cargo doc --open --document-private-items
+
+# 运行 REPL
+cargo run -- repl
+
+# 运行 Lox 文件
+cargo run -- file examples/test.lox
+```
+
+## 技术架构
+
+```d2
+direction: down
+
+A: Lox 源代码
+B: 词法分析器\nScanner
+C: Token 流
+D: 语法分析器\nParser
+E: 抽象语法树\nAST
+F: 解释器\nInterpreter
+G: 环境\nEnvironment
+H: 运行时值\nValue
+
+A -> B
+B -> C
+C -> D
+D -> E
+E -> F
+F -> G
+G -> H
+```
+
+## 核心组件
+
+### 1. 词法分析器 (Scanner)
+
+词法分析器将源代码字符流转换为 Token 流，每个 Token 包含类型、词素和行号信息。
+
+#### Token 类型
+
+```rust
+pub(crate) enum TokenType {
+    // 单字符 Token
+    LeftParen, RightParen,
+    LeftBrace, RightBrace,
+    Comma, Question, Colon, Dot,
+    Minus, Plus, Semicolon, Slash, Star, Bang,
+
+    // 多字符操作符
+    BangEqual, Equal, EqualEqual,
+    LessEqual, GreaterEqual,
+
+    // 字面量
+    Identifier(&'static str),
+    String(&'static str),
+    Number(f64),
+
+    // 关键字
+    And, Class, Else, False, Fun, For, If, Nil,
+    Or, Print, Return, Super, This, True, Var, While, Break,
+
+    // 特殊标记
+    NewLine, EmptyChar, Comment, Eof,
+}
+```
+
+#### 扫描算法
+
+词法分析器使用**最大匹配（Maximal Munch）**原则：
+
+```rust
+fn scan_token(&mut self) -> Result<(), ScannerError> {
+    let next_char = self.advance()?;
+    let r#type = match next_char {
+        '(' => LeftParen,
+        ')' => RightParen,
+        '=' => if self.match_next('=') { EqualEqual } else { Equal },
+        '<' => if self.match_next('=') { LessEqual } else { Less },
+        // ...
+        c if c.is_ascii_digit() => self.number()?,
+        c if c.is_ascii_alphabetic() || c == '_' => self.identifier(),
+        _ => return Err(ScanError::UnexpectedCharacter(next_char)),
+    };
+    // ...
+}
+```
+
+:::note[说明]
+`match_next()` 函数用于检查当前字符是否匹配预期字符，如果是则消耗该字符。这允许解析器查看下一个字符而不会立即消耗它。
+:::
+
+#### 注释处理
+
+支持两种注释风格：
+
+```rust
+'/' => {
+    if self.match_next('/') {
+        // 单行注释
+        while self.peek().is_some_and(|c| c != '\n') {
+            self.advance();
+        }
+        Comment
+    } else if self.match_next('*') {
+        // 多行块注释
+        let mut closed = false;
+        while let Some(c) = self.peek() {
+            if c == '*' && self.peek_second().is_some_and(|c| c == '/') {
+                self.advance(); // consume '*'
+                self.advance(); // consume '/'
+                closed = true;
+                break;
+            }
+            if c == '\n' { self.line += 1; }
+            self.advance();
+        }
+        if closed { Comment } else {
+            return Err(ScanError::UnterminatedBlockComment)
+        }
+    } else {
+        Slash
+    }
+}
+```
+
+### 2. 语法分析器 (Parser)
+
+语法分析器使用**递归下降（Recursive Descent）**策略，直接从语法定义推导出解析逻辑。
+
+#### 语法规则 (EBNF)
+
+```
+program        -> declaration* Eof
+
+declaration    -> class_decl | fun_decl | var_decl | statement
+
+class_decl     -> "class" Identifier ("<" Identifier)? "{" function* "}"
+
+function       -> Identifier "(" parameters? ")" block
+parameters     -> Identifier ("," Identifier)*
+
+statement      -> print | if | while | for | expr_stmt | block | break | return
+
+print          -> "print" expression ";"
+
+if             -> "if" "(" expression ")" statement ("else" statement)?
+
+while          -> "while" "(" expression ")" statement
+
+for            -> "for" "(" (var_decl | expr_stmt | ";")
+                     expression? ";" expression? ")" statement
+
+expression     -> comma
+comma          -> assignment ("," assignment)*
+assignment     -> ternary ("=" assignment)?
+
+ternary        -> logic_or ("?" expression ":" ternary)?
+
+logic_or       -> logic_and ("or" logic_and)*
+logic_and      -> equality ("and" equality)*
+
+equality       -> comparison (("!=" | "==") comparison)*
+comparison     -> term ((">" | ">=" | "<" | "<=") term)*
+
+term           -> factor (("+" | "-") factor)*
+factor         -> unary (("*" | "/") unary)*
+
+unary          -> ("!" | "-") unary | call
+
+call           -> primary (function_call | get_call)*
+function_call  -> "(" arguments? ")"
+get_call       -> "." Identifier
+arguments      -> assignment ( "," assignment )*
+
+primary        -> Number | String | True | False | Nil | Identifier | This | Super | "(" expression ")"
+```
+
+#### 递归下降解析
+
+每个语法规则对应一个方法：
+
+```rust
+fn expression(&mut self) -> Result<Box<Expression>, ParserError> {
+    self.comma()  // 表达式从 comma 规则开始
+}
+
+fn logic_or(&mut self) -> Result<Box<Expression>, ParserError> {
+    let mut expression = self.logic_and()?;
+    while self.check(&Or)? {
+        expression = Expression::logical(expression, self.advance()?, self.logic_and()?)
+    }
+    Ok(expression)
+}
+```
+
+#### 表达式优先级
+
+解析器通过递归调用的顺序自然地实现运算符优先级：
+
+```rust
+// 低优先级
+fn expression()   -> comma()
+fn comma()        -> assignment()
+fn assignment()   -> ternary()
+fn ternary()      -> logic_or()
+fn logic_or()      -> logic_and()
+fn logic_and()     -> equality()
+fn equality()      -> comparison()
+fn comparison()    -> term()
+fn term()          -> factor()
+fn factor()        -> unary()
+fn unary()         -> call()
+// 高优先级
+fn call()          -> primary()
+fn primary()       -> 字面量/括号/标识符
+```
+
+#### 错误恢复
+
+当遇到语法错误时，解析器会同步到下一个语句：
+
+```rust
+fn synchronize(&mut self, error: &ParseError) -> Result<()> {
+    self.error_count += 1;
+    eprintln!("{error}");
+    while let Ok(token) = self.peek() {
+        // 跳过直到遇到语句开始的关键字
+        if matches!(token.r#type, Class | Fun | Var | For | If | While | Print | Return) {
+            return Ok(());
+        }
+        self.advance()?;
+    }
+    Ok(())
+}
+```
+
+### 3. 抽象语法树 (AST)
+
+AST 节点使用 Rust 的 `enum` 表示，类型安全且内存高效：
+
+#### 表达式类型
+
+```rust
+pub(crate) enum Expression {
+    // 字面量
+    Literal(LiteralValue),
+
+    // 一元操作符
+    Unary { operator: Token, right: Box<Expression> },
+
+    // 二元操作符
+    Binary { left: Box<Expression>, operator: Token, right: Box<Expression> },
+
+    // 分组
+    Grouping(Box<Expression>),
+
+    // 逗号序列操作符
+    Comma { left: Box<Expression>, right: Box<Expression> },
+
+    // 三元操作符
+    Ternary { condition: Box<Expression>, then_branch: Box<Expression>, else_branch: Box<Expression> },
+
+    // 逻辑运算
+    Logical { left: Box<Expression>, operator: Token, right: Box<Expression> },
+
+    // 变量
+    Variable(Token),
+
+    // 赋值
+    Assign { target: Token, value: Box<Expression> },
+
+    // 函数调用
+    Call { callee: Box<Expression>, line: usize, arguments: Vec<Expression> },
+
+    // 属性访问
+    PropertyGet { instance: Box<Expression>, property: Token },
+    PropertySet { instance: Box<Expression>, property: Token, value: Box<Expression> },
+
+    // this 和 super
+    This,
+    Super,
+}
+```
+
+#### 语句类型
+
+```rust
+pub(crate) enum Statement {
+    // 表达式语句
+    Expression(Expression),
+
+    // 打印语句
+    Print(Expression),
+
+    // 变量声明
+    VarDeclaration { name_token: Token, initializer: Option<Expression> },
+
+    // 块语句
+    Block(Vec<Statement>),
+
+    // 条件语句
+    If { condition: Expression, then_branch: Box<Statement>, else_branch: Option<Box<Statement>> },
+
+    // 循环语句
+    While { condition: Expression, body: Box<Statement> },
+
+    // For 循环
+    // For 循环被转换为等价的 While 循环
+
+    // 函数声明
+    FunDecl(Function),
+
+    // Return 语句
+    Return(Option<Expression>),
+
+    // Break 语句
+    Break,
+
+    // 类声明
+    ClassDeclaration { name_token: Token, superclass: Option<Token>, methods: Vec<Function> },
+}
+```
+
+### 4. 解释器 (Interpreter)
+
+解释器使用**树遍历（Tree Walking）**方式直接执行 AST。
+
+#### 运行时值类型
+
+```rust
+pub(crate) enum Value {
+    Nil,
+    Boolean(bool),
+    Number(f64),
+    StringValue(String),
+    Callable(CallableValue),
+    Class(RcCell<ClassValue>),
+    Instance(InstanceValue),
+}
+```
+
+#### 表达式求值
+
+```rust
+fn evaluate(&mut self, expr: &Expression) -> Result<RcCell<Value>, InterpreterError> {
+    Ok(match expr {
+        Literal(lit) => RcCell::new(match lit {
+            LiteralValue::Nil => Value::Nil,
+            Boolean(b) => Value::Boolean(*b),
+            LiteralValue::Number(n) => Value::Number(*n),
+            StringLiteral(s) => Value::StringValue(s.to_string()),
+        }),
+        Unary { operator, right } => {
+            let right_value = self.evaluate(right)?;
+            let right_value = right_value.borrow();
+            RcCell::new(match (&operator.r#type, &*right_value) {
+                (Minus, Value::Number(n)) => Value::Number(-n),
+                (Bang, v) => Value::Boolean(!v.to_bool()),
+                _ => return Err(InterpreterError::UnaryOperationError(...)),
+            })
+        }
+        Binary { left, operator, right } => {
+            let left_value = self.evaluate(left)?;
+            let right_value = self.evaluate(right)?;
+            RcCell::new(left_value.binary_op(&operator.r#type, &right_value)?)
+        }
+        Ternary { condition, then_branch, else_branch } => {
+            let condition_value = self.evaluate(condition)?;
+            if condition_value.borrow().to_bool() {
+                self.evaluate(then_branch)?
+            } else {
+                self.evaluate(else_branch)?
+            }
+        }
+        Variable(token) => self.environment.get(token.lexeme)?,
+        Call { callee, line, arguments } => {
+            let callee_value = self.evaluate(callee)?;
+            self.call(callee_value, *line, &arguments)?
+        }
+        // ... 其他表达式类型
+    })
+}
+```
+
+#### 逻辑短路
+
+逻辑运算符 `and` 和 `or` 实现短路求值：
+
+```rust
+fn evaluate_logical(&self, operator: &Token, left: &Expression, right: &Expression)
+    -> Result<RcCell<Value>, InterpreterError>
+{
+    let left_value = self.evaluate(left)?;
+    match operator.r#type {
+        And => {
+            // 如果左边为 false，直接返回，不求右边
+            if !left_value.borrow().to_bool() {
+                left_value
+            } else {
+                self.evaluate(right)?
+            }
+        }
+        Or => {
+            // 如果左边为 true，直接返回，不求右边
+            if left_value.borrow().to_bool() {
+                left_value
+            } else {
+                self.evaluate(right)?
+            }
+        }
+        _ => Err(InterpreterError::LogicalOperationError(...)),
+    }
+}
+```
+
+### 5. 环境管理
+
+环境使用链式结构实现词法作用域：
+
+```rust
+pub struct Environment {
+    variables: HashMap<&'static str, RcCell<Value>>,
+    pub outer: Option<Box<Environment>>,      // 外部作用域
+    pub closure: Option<RcCell<Environment>>,  // 闭包环境
+}
+```
+
+#### 变量查找顺序
+
+变量解析遵循**词法作用域规则**：
+
+1. 在当前作用域查找
+2. 如果未找到，在闭包中查找
+3. 如果仍未找到，在外部作用域递归查找
+
+```rust
+pub fn get(&self, token_name: &'static str) -> Option<RcCell<Value>> {
+    self.variables.get(token_name)
+        .cloned()
+        .or_else(|| self.closure.as_ref().and_then(|env| env.borrow().get(token_name)))
+        .or_else(|| self.outer.as_ref().and_then(|env| env.get(token_name)))
+}
+```
+
+:::tip[作用域链]
+每个 `block` 语句会创建新的环境，离开 block 时自动恢复父环境。这实现了块级作用域。
+:::
+
+### 6. 面向对象特性
+
+#### 类定义
+
+```rust
+pub struct ClassValue {
+    pub name: &'static str,
+    pub superclass: Option<RcCell<Value>>,
+    pub methods: HashMap<&'static str, RcCell<Value>>,
+}
+```
+
+#### 实例创建
+
+```rust
+fn call(&mut self, value: &Value, args: &[RcCell<Value>]) -> Result<RcCell<Value>> {
+    match value {
+        Value::Class(class) => {
+            // 创建实例
+            let instance = RcCell::new(Value::Instance(InstanceValue::new(class.clone())));
+
+            // 如果有 init 方法，自动调用
+            if let Some(initializer) = class.borrow().find_method("init") {
+                // 设置 "this" 绑定
+                if let Value::Callable(CallableValue { closure, .. }) = &*initializer.borrow() {
+                    let mut closure = closure.borrow_mut();
+                    closure.define("this", instance.clone());
+                }
+                self.call(&initializer.borrow(), line, args)?;
+            }
+            Ok(instance)
+        }
+        // ...
+    }
+}
+```
+
+#### 继承实现
+
+```rust
+impl ClassValue {
+    pub fn find_method(&self, name: &str) -> Option<RcCell<Value>> {
+        // 先在当前类查找
+        self.methods.get(name).cloned().or_else(|| {
+            // 如果未找到，在父类查找
+            if let Some(superclass) = self.superclass.as_ref() {
+                if let Value::Class(superclass) = &*superclass.borrow() {
+                    return superclass.borrow().find_method(name);
+                }
+            }
+            None
+        })
+    }
+}
+```
+
+### 7. 闭包实现
+
+闭包是函数捕获其定义环境的能力：
+
+```rust
+Statement::FunDecl(Function { name_token, parameters, body }) => {
+    let callable = CallableValue::new_lox(
+        name_token.lexeme,
+        parameters.clone(),
+        body.clone(),
+        RcCell::default(),
+    );
+    let value = Value::Callable(callable);
+    let value_cell = RcCell::new(value);
+    self.environment.define(name_token.lexeme, value_cell.clone());
+
+    // 关键：捕获当前环境作为闭包
+    if let Value::Callable(c) = &mut *value_cell.borrow_mut() {
+        c.closure = RcCell::new((*self.environment).clone());
+    }
+}
+```
+
+#### 闭包使用示例
+
+```lox
+fun makeAdder(x) {
+  return fun(y) {
+    return x + y;  // 捕获外部变量 x
+  };
+}
+
+var add5 = makeAdder(5);
+print add5(10);  // 输出 15
+```
+
+当函数调用时，它会创建新环境并将闭包环境设置为外层：
+
+```rust
+pub fn set_closure(mut self, closure: RcCell<Environment>) -> Self {
+    self.closure = Some(closure);
+    self
+}
+```
+
+## 执行流程
+
+<Steps>
+
+1. **词法分析**
+   - 读取源代码字符串
+   - 按字符扫描生成 Token
+   - 忽略空白和注释
+
+2. **语法分析**
+   - 使用递归下降解析器
+   - 构建 AST
+   - 错误时同步并继续
+
+3. **环境初始化**
+   - 创建全局环境
+   - 注册原生函数（如 `clock`）
+
+4. **解释执行**
+   - 遍历 AST 节点
+   - 根据节点类型执行相应操作
+   - 管理作用域和闭包
+
+</Steps>
+
+## 错误处理
+
+### 词法错误
+
+```rust
+pub enum ScanErrorType {
+    UnexpectedCharacter(char),
+    UnterminatedString,
+    UnterminatedBlockComment,
+}
+```
+
+### 语法错误
+
+```rust
+pub enum ParseErrorType {
+    ExpectClassName,
+    ExpectSuperClassName,
+    ExpectFunctionNameOnCall,
+    ExpectVariableName,
+    TooManyParameters,
+    TooManyArguments,
+    ExpectPropertyName,
+    InvalidAssignmentTarget,
+    UnexpectedToken(String),
+    // ...
+}
+```
+
+### 运行时错误
+
+```rust
+pub enum InterpreterError {
+    UnaryOperationError(String),
+    BinaryOperationError(String),
+    LogicalOperationError(String),
+    UndefinedVariable(String),
+    ArgumentError(String),
+    NotCallable(String),
+    MethodNotFoundInSuperClass,
+    Break,         // 用于跳出循环
+    Return(RcCell<Value>),  // 用于函数返回
+    // ...
+}
+```
+
+## 标准库
+
+Lox 的标准库非常精简：
+
+| 函数      | 功能                   | 返回值   |
+| --------- | ---------------------- | -------- |
+| `clock()` | 返回程序运行时间（秒） | `Number` |
+
+```lox
+var start = clock();
+// ... 执行一些操作
+var elapsed = clock() - start;
+print elapsed;
+```
+
+## 使用示例
+
+### 基本运算
+
+```lox
+var a = 1 + 2 * 3;
+print a;  // 输出 7
+```
+
+### 条件语句
+
+```lox
+if (a > 5) {
+  print "a is greater than 5";
+} else {
+  print "a is less than or equal to 5";
+}
+```
+
+### 循环
+
+```lox
+var sum = 0;
+for (var i = 0; i < 10; i = i + 1) {
+  sum = sum + i;
+}
+print sum;  // 输出 45
+```
+
+### 函数
+
+```lox
+fun fibonacci(n) {
+  if (n <= 1) {
+    return n;
+  }
+  return fibonacci(n - 1) + fibonacci(n - 2);
+}
+
+print fibonacci(10);  // 输出 55
+```
+
+### 类和继承
+
+```lox
+class Animal {
+  init(name) {
+    this.name = name;
+  }
+
+  speak() {
+    print this.name + " makes a sound";
+  }
+}
+
+class Dog < Animal {
+  speak() {
+    print "Woof!";  // 重写方法
+  }
+}
+
+var dog = Dog("Buddy");
+dog.speak();  // 输出 "Woof!"
+```
+
+### 闭包
+
+```lox
+fun counter() {
+  var count = 0;
+  return fun() {
+    count = count + 1;
+    return count;
+  };
+}
+
+var c1 = counter();
+var c2 = counter();
+
+print c1();  // 输出 1
+print c2();  // 输出 1
+print c1();  // 输出 2
+print c2();  // 输出 2
+```
+
+## 技术亮点
+
+### Rust 特性应用
+
+1. **零成本抽象**
+   - 使用 `enum` 表示 AST 节点，编译时类型检查
+   - 模式匹配确保处理所有情况
+
+2. **内存安全**
+   - 借用检查器确保内存安全
+   - 使用 `Rc` 实现共享所有权
+   - 无需手动内存管理
+
+3. **错误处理**
+   - 使用 `Result<T, E>` 进行显式错误处理
+   - `anyhow` 和 `thiserror` 提供优雅的错误链
+
+4. **性能优化**
+   - 词法分析器使用 `leak` 将字符串转为 `'static` 生命周期，避免源码字符串拷贝
+   - 使用 `RcCell` 确保所有的类型都是引用的，零拷贝
+
+### AST vs 直接执行
+
+| 方法             | 优点               | 缺点                   |
+| ---------------- | ------------------ | ---------------------- |
+| **AST 解释器**   | 实现简单，易于调试 | 每次执行都遍历整个树   |
+| **字节码虚拟机** | 执行速度快         | 实现复杂，需要额外阶段 |
+| **JIT 编译**     | 原生性能           | 非常复杂，平台相关     |
+
+Zloxer 采用 AST 解释器，这是《Crafting Interpreters》书中教学的第一种设计，适合教学和理解语言实现原理。
+
+## 性能考虑
+
+虽然 AST 解释器不是最快的执行方式，但 Zloxer 通过以下方式优化性能：
+
+1. **避免不必要的分配**
+   - 使用 `Box` 递归结构，避免栈溢出
+   - 重用环境结构
+
+2. **快速哈希查找**
+   - 使用 `HashMap` 存储变量
+   - 平均 O(1) 查找时间
+
+3. **短路求值**
+   - 逻辑运算符 `and`/`or` 只在必要时求值右边
+
+## 相关资源
+
+- [Crafting Interpreters](https://craftinginterpreters.com/) - 原书链接
+- [The Rust Reference](https://doc.rust-lang.org/reference/) - Rust 语言参考
+
+## 总结
+
+Zloxer 展示了如何用 Rust 实现一个完整的编程语言解释器：
+
+- **清晰的架构**：词法 → 语法 → 解释
+- **类型安全**：利用 Rust 强类型系统
+- **现代语言特性**：闭包、类、继承
+- **完善的错误处理**：错误恢复和友好提示
+- **可扩展性**：易于添加新特性
+
+这个项目是学习编译原理和 Rust 编程的实践，展示了如何将理论转化为实际可运行的代码。
