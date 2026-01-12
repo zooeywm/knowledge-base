@@ -1,0 +1,169 @@
+---
+title: "Rust IOC 容器搭建"
+description: "利用 Rust 语言特性，纯静态零消耗的 IOC 容器"
+---
+
+import { Steps } from "@astrojs/starlight/components";
+
+<Steps>
+
+1. 定义 `Chef` 特性，并使用 [dep-inj](https://crates.io/crates/dep-inj) 库，定义 `Jack` 实现 `Chef`，宏会生成表示 `Jack` 状态的 `JackState`，以及依赖关系
+2. 定义 `Waiter` 特性，并使用 `dep-inj-target` 库（`dep-inj` 库无状态版），定义 `Tom` 实现 `Waiter`，以及依赖关系
+3. `dep-inj` 和 `dep-inj-target` 生成 inj_ref, prj_ref 等等方法，用来注射和投影(反射)
+4. 通过 inj_ref, prj_ref 为容器实现 Chef 和 Waiter 特性，并把有状态的 `JackState` 存入容器
+5. 创建容器实例，通过容器调用的时候会解析依赖关系调用依赖的方法
+
+</Steps>
+
+仓库：[static-ioc](https://github.com/zooeywm/playground-rs/tree/main/static-ioc)
+
+完整代码如下：
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+<Tabs>
+<TabItem label="src/chef.rs">
+
+```rust
+//! 厨师
+
+/// 厨师特性
+pub trait Chef {
+    fn cook(&self) -> &str;
+}
+
+#[derive(dep_inj::DepInj)]
+#[target(Jack)]
+pub struct JackState {
+    skill: String,
+}
+
+impl JackState {
+    pub fn new(skill: String) -> Self {
+        Self { skill }
+    }
+}
+
+impl<Deps> Chef for Jack<Deps>
+where
+    Deps: AsRef<JackState>,
+{
+    /// 我们假设厨师做饭不需要依赖其他特性，
+    /// 意味着它不依赖任何其他结构体。
+    /// 因此实际上无需为其派生 DepInj。
+    /// 其实以下代码即可实现：
+    /// pub struct Jack { skill: String }
+    /// impl Chef for Jack {
+    ///     fn cook(&self) {
+    ///         println!("{}", self.skill);
+    ///     }
+    /// }
+    /// 此处使用 DepInj 仅作示例。
+    /// 若需访问 state 中的字段，必须显式指定
+    fn cook(&self) -> &str {
+        &self.skill
+    }
+}
+```
+
+</TabItem>
+<TabItem label="src/waiter.rs">
+
+```rust
+//! 服务员
+
+use crate::chef::Chef;
+
+/// 服务员特性
+pub trait Waiter {
+    fn serve(&self) -> &str;
+}
+
+#[dep_inj_target::dep_inj_target]
+pub struct Tom;
+
+impl<Deps> Tom<Deps>
+where
+    Deps: Chef,
+{
+    pub fn serve(&self) -> &str {
+        //  使用 deref 机制自动使用 Trait `Chef` 下的方法
+        self.prj_ref().cook()
+        // Or `(self.prj_ref() as &dyn Chef).cook()`
+    }
+}
+```
+
+</TabItem>
+
+<TabItem label="src/boilerplate.rs">
+
+```rust
+use crate::{
+    Restaurant,
+    chef::{Chef, Jack},
+    waiter::{Tom, Waiter},
+};
+
+// 为容器提供 Trait 实现的样板
+impl Chef for Restaurant {
+    fn cook(&self) -> &str {
+        // 使用 dep-inj 宏生成的 inj_ref(),
+        // 从 Container 获取 &Jack 进而调用 Jack 的 cook 方法
+        Jack::inj_ref(self).cook()
+    }
+}
+
+impl Waiter for Restaurant {
+    fn serve(&self) -> &str {
+        Tom::inj_ref(self).serve()
+    }
+}
+```
+
+</TabItem>
+<TabItem label="src/main.rs">
+
+```rust
+ use crate::waiter::Waiter;
+
+ mod boilerplate;
+ mod chef;
+ mod waiter;
+
+ use crate::chef::JackState;
+
+ #[derive(derive_more::AsRef)]
+ pub struct Restaurant {
+     #[as_ref]
+     jack: JackState,
+ }
+
+ impl Restaurant {
+     pub fn new() -> Self {
+         let jack = JackState::new("麻婆豆腐".to_string());
+         Self { jack }
+     }
+ }
+
+ impl Default for Restaurant {
+     fn default() -> Self {
+         Self::new()
+     }
+ }
+
+ fn main() {
+     let container = Restaurant::new();
+     // 容器调用 `serve()` 时，相当于调用 `boilerplate` 中我们实现的 `Tom`
+     // 通过 `inj_ref` 注入的引用实现的 `Waiter` 的 `serve` 方法，
+     // 因为`Tom` 在 impl `Waiter` 特性的时候通过 `Deps` 依赖了 `Chef` 这个特性，
+     // 而我们在 `boilerplate` 中为容器实现了这个特性（通过 `Jack` `inj_ref` 注入的引用来调用 cook())
+     // 所以 `serve()` 就获得了 `cook()` 的值，并返回了！
+     let dish = container.serve();
+     println!("{dish}");
+ }
+```
+
+</TabItem>
+</Tabs>
+
