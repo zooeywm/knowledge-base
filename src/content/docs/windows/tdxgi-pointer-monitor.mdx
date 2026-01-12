@@ -1,0 +1,934 @@
+---
+title: "DxgiPointerMonitor：Windows 鼠标指针监视器"
+description: "基于 DXGI Desktop Duplication API 的 Windows 鼠标指针捕获和形状保存工具"
+tags:
+  - windows
+  - dxgi
+  - directx
+  - mouse
+  - pointer
+  - qt6
+---
+
+import { Steps } from "@astrojs/starlight/components";
+
+## 概述
+
+DxgiPointerMonitor 是一个基于 Windows DirectX Graphics Infrastructure (DXGI) 的鼠标指针监视器工具。它使用 DXGI Desktop Duplication API 实时捕获系统鼠标指针的位置、可见性和形状信息，并能将指针形状保存为 PNG 图片文件。
+
+### 项目特点
+
+| 特性             | 说明                                               |
+| ---------------- | -------------------------------------------------- |
+| **实时捕获**     | 使用 DXGI Desktop Duplication API 实时监控鼠标指针 |
+| **多显示器支持** | 支持多个显示器的指针捕获                           |
+| **形状保存**     | 将鼠标指针形状保存为 PNG 文件                      |
+| **形状解析**     | 支持多种指针形状格式（彩色、单色、掩色）           |
+| **多线程架构**   | 监视线程与主线程分离，避免阻塞 UI                  |
+| **Qt6/QML**      | 现代化的 Qt Quick 界面                             |
+
+## 技术架构
+
+```d2
+direction: down
+
+A: 主线程\nQt UI
+B: QQmlApplicationEngine
+
+C: 监视线程
+D: DXGI Desktop Duplication
+E: D3D11 Device
+F: IDXGIOutputDuplication
+G: 获取帧和指针信息
+H: 解析指针形状
+I: 保存为 PNG
+J: pointer_pngs 目录
+
+A -> B
+
+C -> D
+D -> E
+E -> F
+F -> G
+G -> H
+H -> I
+I -> J
+```
+
+## 核心组件
+
+### 1. 主要类结构
+
+```cpp
+class DxgiPointerMonitor : public QObject
+{
+    Q_OBJECT
+    Q_DECLARE_PRIVATE(DxgiPointerMonitor)
+
+public:
+    explicit DxgiPointerMonitor(QObject *parent = nullptr);
+    ~DxgiPointerMonitor() override;
+
+public:
+    // 捕获指针状态的主方法
+    bool capture(bool &visible, QPoint &position, QPoint &hotSpot,
+            QByteArray &cursorData, bool &changed);
+};
+```
+
+### 2. 私有实现类
+
+```cpp
+class DxgiPointerMonitorPrivate
+{
+public:
+    PointerInfo pointerInfo;           // 指针信息
+    QList<DisplayDuplication *> displayDuplications;  // 多显示器支持
+    qint64 lastHash = 0;           // 用于检测形状变化
+    int imageCounter = 0;             // 图片计数器
+    bool isFirst = true;               // 首次运行标志
+};
+```
+
+## DXGI Desktop Duplication 初始化
+
+### 设备创建流程
+
+使用 D3D11 创建设备和 DXGI 输出复制对象：
+
+```cpp
+void DxgiPointerMonitorPrivate::resetDisplayDuplications()
+{
+    // 支持的驱动类型
+    D3D_DRIVER_TYPE driverTypes[] = {
+        D3D_DRIVER_TYPE_HARDWARE,    // 硬件加速
+        D3D_DRIVER_TYPE_WARP,        // 软件渲染
+        D3D_DRIVER_TYPE_REFERENCE     // 参考驱动（慢速，用于调试）
+    };
+
+    // 支持的特性级别
+    D3D_FEATURE_LEVEL featureLevels[] = {
+        D3D_FEATURE_LEVEL_11_0,
+        D3D_FEATURE_LEVEL_10_1,
+        D3D_FEATURE_LEVEL_10_0,
+        D3D_FEATURE_LEVEL_9_1
+    };
+
+    // 遍历所有输出
+    while (true) {
+        // 创建 D3D11 设备
+        for (UINT driverTypeIndex = 0; driverTypeIndex < numDriverTypes; ++driverTypeIndex) {
+            hr = D3D11CreateDevice(nullptr, driverTypes[driverTypeIndex], nullptr, 0,
+                                    featureLevels, numFeatureLevels, D3D11_SDK_VERSION,
+                                    &displayDuplication->d3d11Device, &featureLevel, nullptr);
+            if (SUCCEEDED(hr)) {
+                break;  // 设备创建成功
+            }
+        }
+
+        // 获取 DXGI 设备和适配器
+        ComPtr<IDXGIDevice> dxgiDevice;
+        hr = displayDuplication->d3d11Device->QueryInterface(dxgiDevice.GetAddressOf());
+
+        ComPtr<IDXGIAdapter> dxgiAdapter;
+        hr = dxgiDevice->GetParent(__uuidof(IDXGIAdapter),
+                                    reinterpret_cast<void**>(dxgiAdapter.GetAddressOf()));
+
+        // 枚举输出
+        ComPtr<IDXGIOutput> dxgiOutput;
+        hr = dxgiAdapter->EnumOutputs(currentIndex, &dxgiOutput);
+        if (!dxgiOutput || FAILED(hr)) {
+            break;  // 没有更多输出
+        }
+
+        // 获取输出描述
+        dxgiOutput->GetDesc(&displayDuplication->outputDesc);
+
+        // 查询 IDXGIOutput1 接口（支持新功能）
+        ComPtr<IDXGIOutput1> dxgiOutput1;
+        hr = dxgiOutput->QueryInterface(dxgiOutput1.GetAddressOf());
+
+        // 创建桌面复制对象
+        hr = dxgiOutput1->DuplicateOutput(displayDuplication->d3d11Device.Get(),
+                                               &displayDuplication->deskDupl);
+        if (FAILED(hr)) {
+            qCCritical(lcPointerMonitor,
+                      "Failed to create desktop duplication for output %d", currentIndex);
+            return;
+        }
+
+        displayDuplication->displayIndex = currentIndex++;
+        displayDuplications.append(displayDuplication);
+    }
+}
+```
+
+:::note[重要]
+`DXGI_ERROR_NOT_CURRENTLY_AVAILABLE` 错误表示已有其他应用程序在使用 Desktop Duplication API。Windows 限制同时只能有一个应用使用此 API。
+:::
+
+## 鼠标指针捕获
+
+### 捕获循环
+
+监视线程持续运行捕获循环：
+
+```cpp
+// 主函数中的捕获循环
+auto runCapture = [monitor]() {
+    while (!QThread::currentThread()->isInterruptionRequested()) {
+        bool visible = false;
+        QPoint position{};
+        QPoint hotspot{};
+        QByteArray cursorData{};
+        bool changed = false;
+
+        // 调用捕获方法
+        monitor->capture(visible, position, hotspot, cursorData, changed);
+
+        // 睡眠 10ms 减少CPU占用
+        QThread::msleep(10);
+    }
+};
+
+// 启动监视线程
+QObject::connect(&monitorThread, &QThread::started, runCapture);
+monitorThread.start();
+```
+
+### 获取帧和指针信息
+
+```cpp
+bool DxgiPointerMonitor::capture(bool &visible, QPoint &position,
+                                  QPoint &hotSpot, QByteArray &cursorData,
+                                  bool &changed)
+{
+    // 循环所有显示器
+    for (DisplayDuplication *displayDuplication : d->displayDuplications) {
+        DXGI_OUTDUPL_FRAME_INFO frameInfo{};
+        FrameInfo frameInfoHolder(displayDuplication, &frameInfo);
+
+        // 获取下一帧
+        switch (displayDuplication->getFrame(frameInfoHolder)) {
+            case DisplayDuplication::FrameReturn::Success:
+                break;
+            case DisplayDuplication::FrameReturn::Timeout:
+                continue;  // 超时，尝试下一个显示器
+            case DisplayDuplication::FrameReturn::Failure:
+                return false;  // 失败，尝试重新初始化
+        }
+
+        // 获取指针信息
+        if (!displayDuplication->getPointerInfo(frameInfoHolder.inner)) {
+            continue;
+        }
+
+        // 如果指针信息发生变化，返回
+        if (!d->pointerInfo.changed) {
+            continue;
+        }
+
+        // 更新输出参数
+        visible = d->pointerInfo.visible;
+        position = d->pointerInfo.position;
+        hotspot = QPoint(static_cast<int>(d->pointerInfo.hotSpotX()),
+                        static_cast<int>(d->pointerInfo.hotSpotY()));
+        changed = d->pointerInfo.changed;
+
+        // 转换指针形状为 PNG 格式
+        if (!d->pointerInfo.shapeBuffer.isEmpty()) {
+            QImage image;
+            if (d->pointerInfo.ConvertPointerShapeToQImage(image)) {
+                QBuffer buffer(&cursorData);
+                buffer.open(QIODevice::WriteOnly);
+                image.save(&buffer, "PNG");
+            }
+        }
+
+        break;  // 找到变化后退出循环
+    }
+    return true;
+}
+```
+
+### 获取帧实现
+
+```cpp
+DisplayDuplication::FrameReturn DisplayDuplication::getFrame(FrameInfo &frameInfoHolder) const
+{
+    ComPtr<IDXGIResource> desktopResource;
+
+    // 获取下一帧（超时 10ms）
+    HRESULT hr = deskDupl->AcquireNextFrame(10, frameInfoHolder.inner,
+                                                     desktopResource.GetAddressOf());
+
+    if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
+        return FrameReturn::Timeout;
+    }
+
+    if (FAILED(hr)) {
+        qCCritical(lcPointerMonitor, "Failed to acquire next frame");
+        return FrameReturn::Failure;
+    }
+
+    frameInfoHolder.valid = true;
+    return FrameReturn::Success;
+}
+```
+
+## 鼠标指针形状解析
+
+### DXGI 指针形状类型
+
+DXGI 支持三种指针形状格式：
+
+| 类型                                             | 说明     | 格式                            |
+| ------------------------------------------------ | -------- | ------------------------------- |
+| **DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR**        | 彩色光标 | 32 bpp ARGB 位图                |
+| **DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME**   | 单色光标 | 1 bpp AND 掩码 + 1 bpp XOR 掩码 |
+| **DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR** | 掩色光标 | 32 bpp ARGB，alpha 控制混合模式 |
+
+### 彩色光标解析
+
+```cpp
+case DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR:
+{
+    // 彩色光标是标准的 32 bpp ARGB 格式
+    image = QImage(
+        reinterpret_cast<const uchar*>(shapeBuffer.constData()),
+        static_cast<int>(width()),
+        static_cast<int>(height()),
+        static_cast<qsizetype>(pitch()),
+        QImage::Format_ARGB32
+    );
+    return true;
+}
+```
+
+### 单色光标解析
+
+单色光标使用 AND/XOR 掩码机制：
+
+```cpp
+case DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME:
+{
+    // 高度是完整高度的一半（上半部分是 AND，下半部分是 XOR）
+    int realHeight = static_cast<int>(height()) / 2;
+    image = QImage(static_cast<int>(width()), realHeight, QImage::Format_ARGB32);
+
+    for (int row = 0; row < realHeight; ++row) {
+        auto dst = reinterpret_cast<quint32*>(image.scanLine(row));
+
+        for (quint32 col = 0; col < width(); ++col) {
+            // 计算当前位的掩码（从高位到低位）
+            uint8_t mask = 0x80 >> (col % 8);
+
+            // AND 掩码部分（上半部分）
+            bool andBit = (shapeBuffer[row * pitch() + col / 8] & mask);
+
+            // XOR 掩码部分（下半部分）
+            bool xorBit = (shapeBuffer[(realHeight + row) * pitch() + col / 8] & mask);
+
+            quint32 pixel = 0x00000000;  // 默认 alpha = 255
+
+            if (!andBit && !xorBit) {
+                // Case 1: AND=0 XOR=0 → 黑色
+                pixel = 0xFF000000;
+            } else if (!andBit && xorBit) {
+                // Case 2: AND=0 XOR=1 → 白色
+                pixel = 0xFFFFFFFF;
+            } else if (andBit && !xorBit) {
+                // Case 3: AND=1 XOR=0 → 透明（显示桌面背景）
+                pixel = 0x00000000;
+            } else {  // (andBit && xorBit)
+                // Case 4: AND=1 XOR=1 → 反色（黑色）
+                pixel = 0xFF000000;
+            }
+
+            dst[col] = pixel;
+        }
+    }
+
+    return true;
+}
+```
+
+:::tip[单色光标原理]
+AND/XOR 掩码是一种经典的鼠标光标绘制技术：
+
+- **AND 掩码**：定义哪些像素需要反转（1=反转，0=保持）
+- **XOR 掩码**：定义如何反转（1=反色，0=透明）
+  这种技术允许光标在任何背景颜色上保持可见。
+  :::
+
+### 掩色光标解析
+
+```cpp
+case DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR:
+{
+    // 32 bpp ARGB 格式，alpha 通道控制混合模式
+    image = QImage(
+        reinterpret_cast<const uchar*>(shapeBuffer.constData()),
+        static_cast<int>(width()),
+        static_cast<int>(height()),
+        static_cast<qsizetype>(pitch()),
+        QImage::Format_ARGB32
+    );
+
+    for (quint32 row = 0; row < height(); ++row) {
+        auto dst = reinterpret_cast<quint32*>(image.scanLine(static_cast<int>(row)));
+
+        for (quint32 col = 0; col < width(); ++col) {
+            quint32 pixel = dst[col];
+            uint8_t alpha = pixel >> 24;
+
+            if (alpha == 0xFF) {
+                // alpha = 0xFF → XOR 操作
+                // RGB 为黑色（0x000000）→ 透明
+                // RGB 为其他值 → 黑色
+                if ((pixel & 0x00FFFFFF) == 0x00000000) {
+                    dst[col] = 0x00000000;  // 透明
+                } else {
+                    dst[col] = 0xFF000000;  // 黑色
+                }
+            } else if (alpha == 0x00) {
+                // alpha = 0x00 → 不透明，保留原 RGB
+                dst[col] = (pixel & 0x00FFFFFF) | 0xFF000000;
+            }
+        }
+    }
+
+    return true;
+}
+```
+
+## 指针信息获取
+
+### 位置更新逻辑
+
+```cpp
+bool DisplayDuplication::getPointerInfo(DXGI_OUTDUPL_FRAME_INFO *frameInfo) const
+{
+    // 非零的时间戳表示有鼠标位置更新
+    if (frameInfo->LastMouseUpdateTime.QuadPart == 0) {
+        return false;
+    }
+
+    bool updatePosition = true;
+
+    // 避免错误的位置更新
+    // 如果指针不可见，且上次更新来自不同输出，不更新位置
+    if (!frameInfo->PointerPosition.Visible &&
+        (monitor->pointerInfo.whoUpdatedPositionLast != displayIndex)) {
+        updatePosition = false;
+    }
+
+    // 如果两个输出都说可见，只在新时间戳更新时更新
+    if (frameInfo->PointerPosition.Visible &&
+        monitor->pointerInfo.visible &&
+        monitor->pointerInfo.whoUpdatedPositionLast != displayIndex &&
+        monitor->pointerInfo.lastTimeStamp > frameInfo->LastMouseUpdateTime.QuadPart) {
+        updatePosition = false;
+    }
+
+    // 使用 Windows API 获取物理鼠标位置
+    POINT cursorPos{0, 0};
+    if (!GetCursorPos(&cursorPos)) {
+        qWarning(lcPointerMonitor, "GetCursorPos failed, LastError: %d", GetLastError());
+    }
+
+    // 更新位置
+    if (updatePosition) {
+        monitor->pointerInfo.position.setX(cursorPos.x);
+        monitor->pointerInfo.position.setY(cursorPos.y);
+        monitor->pointerInfo.whoUpdatedPositionLast = displayIndex;
+    }
+    monitor->pointerInfo.lastTimeStamp = frameInfo->LastMouseUpdateTime.QuadPart;
+
+    // 更新可见性
+    if (monitor->pointerInfo.visible != (frameInfo->PointerPosition.Visible != 0)) {
+        monitor->pointerInfo.visible = frameInfo->PointerPosition.Visible != 0;
+        monitor->pointerInfo.changed = true;
+    }
+
+    return true;
+}
+```
+
+### 形状缓存和变化检测
+
+```cpp
+bool DisplayDuplication::getPointerInfo(DXGI_OUTDUPL_FRAME_INFO *frameInfo) const
+{
+    // 无新形状
+    if (frameInfo->PointerShapeBufferSize == 0) {
+        if (monitor->pointerInfo.visible) {
+            return false;
+        }
+        // 检查光标是否在当前显示器区域内
+        bool cursorInDisplay = cursorPos.x >= outputDesc.DesktopCoordinates.left &&
+                                cursorPos.x < outputDesc.DesktopCoordinates.right &&
+                                cursorPos.y >= outputDesc.DesktopCoordinates.top &&
+                                cursorPos.y < outputDesc.DesktopCoordinates.bottom;
+        if (!cursorInDisplay) {
+            return false;
+        }
+        return true;
+    }
+
+    // 调整缓冲区大小
+    if (frameInfo->PointerShapeBufferSize > monitor->pointerInfo.shapeBuffer.size()) {
+        monitor->pointerInfo.shapeBuffer.resize(frameInfo->PointerShapeBufferSize);
+    }
+
+    // 获取形状数据
+    UINT bufferSizeRequired = 0;
+    HRESULT hr = deskDupl->GetFramePointerShape(
+        frameInfo->PointerShapeBufferSize,
+        reinterpret_cast<VOID*>(monitor->pointerInfo.shapeBuffer.data()),
+        &bufferSizeRequired,
+        &monitor->pointerInfo.shapeInfo
+    );
+
+    if (FAILED(hr)) {
+        monitor->pointerInfo.shapeBuffer.clear();
+        qCCritical(lcPointerMonitor, "Failed to get frame pointer shape");
+        return false;
+    }
+
+    // 调整到实际所需大小
+    monitor->pointerInfo.shapeBuffer.resize(bufferSizeRequired);
+
+    // 计算哈希值检测形状变化
+    size_t hash = 0;
+    if (!monitor->pointerInfo.shapeBuffer.isEmpty()) {
+        hash = qHash(monitor->pointerInfo.shapeBuffer);
+        if (hash != monitor->pointerInfo.hash) {
+            monitor->pointerInfo.hash = hash;
+            monitor->pointerInfo.changed = true;
+        }
+    }
+
+    return true;
+}
+```
+
+## 图片保存
+
+### 保存为 PNG 文件
+
+使用 Qt 的 QImage 将指针形状保存为 PNG：
+
+```cpp
+if (!d->pointerInfo.shapeBuffer.isEmpty()) {
+    QImage image;
+    if (d->pointerInfo.ConvertPointerShapeToQImage(image)) {
+        // 生成唯一文件名
+        QString timestamp = QDateTime::currentDateTime().toString("yyyyMMdd_hhmmss_zzz");
+        QString base_filename = QString("pointer_pngs/pointer_%1").arg(d->imageCounter);
+
+        QString png_filename = base_filename + ".png";
+
+        // 保存为 PNG
+        bool png_saved = d->pointerInfo.SavePointerToPNG(png_filename);
+        if (png_saved) {
+            qCInfo(lcPointerMonitor, "Saved pointer image to: %s", qPrintable(png_filename));
+        }
+    }
+}
+
+bool PointerInfo::SavePointerToPNG(const QString& filename)
+{
+    QImage image;
+    if (!ConvertPointerShapeToQImage(image)) {
+        return false;
+    }
+
+    return image.save(filename, "PNG");
+}
+```
+
+### 保存为 BMP 文件
+
+原生 BMP 格式保存实现：
+
+```cpp
+bool PointerImageSaver::SavePointerToBMP(
+    const BYTE* shapeBuffer,
+    const DXGI_OUTDUPL_POINTER_SHAPE_INFO& shapeInfo,
+    const std::string& filename)
+{
+    // 转换为 RGBA 像素数据
+    BYTE* pixelData = nullptr;
+    int width = 0, height = 0;
+    if (!ConvertPointerShapeToRGBA(shapeBuffer, shapeInfo, &pixelData, &width, &height)) {
+        return false;
+    }
+
+    // 打开文件
+    FILE* file = nullptr;
+    errno_t err = fopen_s(&file, filename.c_str(), "wb");
+    if (err != 0 || !file) {
+        delete[] pixelData;
+        return false;
+    }
+
+    // 写入 BMP 文件头 (14 bytes)
+    int pixelDataSize = width * height * 3;  // RGB format
+    int rowPadding = (4 - (width * 3) % 4) % 4;
+    int totalSize = 54 + pixelDataSize + (height * rowPadding);
+
+    unsigned char fileHeader[14] = {0};
+    fileHeader[0] = 'B';  // BMP 签名 "BM"
+    fileHeader[1] = 'M';
+    fileHeader[2] = (unsigned char)(totalSize);
+    fileHeader[3] = (unsigned char)(totalSize >> 8);
+    // ...
+
+    // 写入 BMP 信息头 (40 bytes)
+    unsigned char infoHeader[40] = {0};
+    infoHeader[0] = 40;  // 信息头大小
+    infoHeader[4] = (unsigned char)(width);
+    infoHeader[12] = (unsigned char)(1);  // 平面数
+    infoHeader[14] = (unsigned char)(24);  // 位深度 (RGB)
+    // ...
+
+    fwrite(fileHeader, sizeof(unsigned char), 14, file);
+    fwrite(infoHeader, sizeof(unsigned char), 40, file);
+
+    // 写入像素数据
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            int pixelIndex = (y * width + x) * 4;
+            // BMP 使用 BGR 格式，需要交换 R 和 B
+            fputc(pixelData[pixelIndex + 2], file);  // B
+            fputc(pixelData[pixelIndex + 1], file);  // G
+            fputc(pixelData[pixelIndex + 0], file);  // R
+        }
+        // 添加行填充
+        for (int pad = 0; pad < rowPadding; ++pad) {
+            fputc(0, file);
+        }
+    }
+
+    fclose(file);
+    delete[] pixelData;
+    return true;
+}
+```
+
+:::tip[BMP 格式说明]
+BMP 文件使用小端字节序存储多字节值。像素数据从左下角开始，按行存储，每行需要 4 字节对齐的填充。
+:::
+
+## 执行流程
+
+<Steps>
+
+1. **初始化 DXGI 环境**
+   - 创建 D3D11 设备
+   - 枚举所有显示器输出
+   - 为每个输出创建 IDXGIOutputDuplication
+
+2. **启动监视线程**
+   - 在独立 QThread 中运行捕获循环
+   - 每隔 10ms 轮询一次
+
+3. **捕获桌面帧**
+   - 调用 AcquireNextFrame 获取新帧
+   - 处理超时和错误情况
+
+4. **获取指针信息**
+   - 检查指针位置更新
+   - 获取指针形状数据
+   - 检测形状变化（哈希对比）
+
+5. **解析指针形状**
+   - 根据 DXGI 类型解析形状数据
+   - 转换为 QImage 格式
+
+6. **保存指针图像**
+   - 当形状变化时保存为 PNG
+   - 使用时间戳生成唯一文件名
+
+</Steps>
+
+## 资源管理
+
+### ComPtr 智能指针
+
+使用 Windows Runtime Library 的智能指针自动管理 COM 对象：
+
+```cpp
+using Microsoft::WRL::ComPtr;
+
+ComPtr<ID3D11Device> d3d11Device;
+ComPtr<IDXGIOutputDuplication> deskDupl;
+ComPtr<IDXGIResource> desktopResource;
+
+// ComPtr 自动调用 Release()，无需手动管理
+```
+
+### 帧信息管理
+
+使用 RAII 模式管理 DXGI 帧：
+
+```cpp
+class FrameInfo
+{
+public:
+    explicit FrameInfo(DisplayDuplication *duplication, DXGI_OUTDUPL_FRAME_INFO *frameInfo)
+        : owner(duplication), inner(frameInfo) {}
+
+    ~FrameInfo() {
+        if (valid && owner && inner) {
+            // 自动释放帧
+            HRESULT hr = owner->deskDupl->ReleaseFrame();
+            if (FAILED(hr)) {
+                qCCritical(lcPointerMonitor, "Failed to release frame");
+            }
+            valid = false;
+        }
+    }
+
+private:
+    DXGI_OUTDUPL_FRAME_INFO *inner = nullptr;
+    DisplayDuplication *owner = nullptr;
+    bool valid = false;
+};
+```
+
+## 错误处理
+
+### 常见 DXGI 错误
+
+| 错误代码                             | 原因                                 | 处理方式           |
+| ------------------------------------ | ------------------------------------ | ------------------ |
+| `DXGI_ERROR_WAIT_TIMEOUT`            | 无新帧可用                           | 继续等待下一次轮询 |
+| `DXGI_ERROR_NOT_CURRENTLY_AVAILABLE` | 其他应用正在使用 Desktop Duplication | 关闭其他应用后重试 |
+| `E_ACCESSDENIED`                     | 桌面访问被拒绝                       | 尝试重新初始化     |
+| `E_INVALIDARG`                       | 参数无效                             | 检查输入参数       |
+
+### 错误恢复
+
+```cpp
+switch (displayDuplication->getFrame(frameInfoHolder)) {
+    case DisplayDuplication::FrameReturn::Timeout:
+        // 超时是正常的，继续等待
+        continue;
+    case DisplayDuplication::FrameReturn::Failure:
+        // 失败时尝试重新初始化
+        qDeleteAll(d->displayDuplications);
+        d->displayDuplications.clear();
+        return false;
+    case DisplayDuplication::FrameReturn::Success:
+        // 成功处理帧
+        break;
+}
+```
+
+## 性能优化
+
+### 1. 避免不必要的保存
+
+使用哈希值检测形状变化：
+
+```cpp
+size_t hash = qHash(monitor->pointerInfo.shapeBuffer);
+if (hash != monitor->pointerInfo.hash) {
+    monitor->pointerInfo.hash = hash;
+    monitor->pointerInfo.changed = true;
+}
+```
+
+### 2. 睡眠间隔
+
+合理的睡眠间隔减少 CPU 占用：
+
+```cpp
+QThread::msleep(10);  // 100Hz 轮询频率
+```
+
+### 3. 缓冲区复用
+
+复用形状缓冲区，减少内存分配：
+
+```cpp
+// 只在需要时调整大小
+if (frameInfo->PointerShapeBufferSize > monitor->pointerInfo.shapeBuffer.size()) {
+    monitor->pointerInfo.shapeBuffer.resize(frameInfo->PointerShapeBufferSize);
+}
+```
+
+## 多显示器支持
+
+项目支持多个显示器的指针捕获：
+
+```cpp
+// 遍历所有显示输出
+UINT currentIndex = 0;
+while (true) {
+    ComPtr<IDXGIOutput> dxgiOutput;
+    hr = dxgiAdapter->EnumOutputs(currentIndex, &dxgiOutput);
+
+    if (!dxgiOutput || FAILED(hr)) {
+        break;  // 没有更多输出
+    }
+
+    // 为每个输出创建复制对象
+    hr = dxgiOutput1->DuplicateOutput(displayDuplication->d3d11Device.Get(),
+                                               &displayDuplication->deskDupl);
+
+    displayDuplication->displayIndex = currentIndex++;
+    displayDuplications.append(displayDuplication);
+}
+
+// 在捕获循环中遍历所有显示器
+for (DisplayDuplication *displayDuplication : d->displayDuplications) {
+    // 尝试获取每个显示器的指针信息
+    if (displayDuplication->getPointerInfo(frameInfoHolder.inner)) {
+        break;  // 找到变化的显示器后退出
+    }
+}
+```
+
+## 特殊注意事项
+
+### Windows 指针优化
+
+:::caution[重要提示]
+Windows 10 在开启某些优化选项后，当鼠标指针调整到 10 及以上大小时，指针层会隐藏，指针在桌面图像层绘制。此时 DXGI 可能无法获取到有效的指针形状数据。
+:::
+
+### 首次运行处理
+
+首次运行时默认将指针设置为隐藏：
+
+```cpp
+if (d->isFirst) {
+    visible = false;
+    changed = true;
+    d->isFirst = false;
+
+    // 获取屏幕中心作为初始位置
+    RECT rc;
+    if (GetWindowRect(GetDesktopWindow(), &rc)) {
+        LONG w = rc.right - rc.left;
+        LONG h = rc.bottom - rc.top;
+        position = QPoint(w / 2, h / 2);
+    }
+
+    return true;
+}
+```
+
+### 指针可见性边界
+
+检查指针是否在当前显示器区域内：
+
+```cpp
+bool cursorInDisplay =
+    cursorPos.x >= outputDesc.DesktopCoordinates.left &&
+    cursorPos.x < outputDesc.DesktopCoordinates.right &&
+    cursorPos.y >= outputDesc.DesktopCoordinates.top &&
+    cursorPos.y < outputDesc.DesktopCoordinates.bottom;
+```
+
+## Qt6 + QML 集成
+
+### QML 界面
+
+```qml
+import QtQuick
+
+Window {
+    width: 640
+    height: 480
+    visible: true
+    title: qsTr("Hello World")
+}
+```
+
+### 主程序
+
+```cpp
+int main(int argc, char *argv[])
+{
+    QGuiApplication app(argc, argv);
+
+    QQmlApplicationEngine engine;
+    QObject::connect(
+        &engine, &QQmlApplicationEngine::objectCreationFailed,
+        &app,
+        []() { QCoreApplication::exit(-1); },
+        Qt::QueuedConnection
+    );
+
+    engine.loadFromModule("DxgiPointerMonitor", "Main");
+
+    // 创建监视器对象并移到工作线程
+    QThread monitorThread;
+    DxgiPointerMonitor *monitor = new DxgiPointerMonitor();
+    monitor->moveToThread(&monitorThread);
+
+    // 连接线程信号
+    QObject::connect(&monitorThread, &QThread::started, runCapture);
+    monitorThread.start();
+
+    // 退出时清理
+    QObject::connect(&app, &QCoreApplication::aboutToQuit, [&monitorThread, monitor]() {
+        monitorThread.requestInterruption();
+        monitorThread.quit();
+        monitorThread.wait();
+        delete monitor;
+    });
+
+    return app.exec();
+}
+```
+
+## 依赖项
+
+| 库                          | 说明                              |
+| --------------------------- | --------------------------------- |
+| **Qt6**                     | 6.5 或更高版本，Quick 和 GUI 模块 |
+| **DirectX 11 SDK**          | Windows SDK 自带                  |
+| **Windows Runtime Library** | `windowsapp` 或 `wrl`             |
+| **CMake**                   | 3.16 或更高                       |
+
+## 应用场景
+
+1. **调试和测试**
+   - 验证自定义鼠标光标渲染
+   - 测试光标形状变化
+
+2. **光标库构建**
+   - 收集系统光标形状
+   - 为应用程序提供丰富的光标资源
+
+3. **性能监控**
+   - 监控光标活动频率
+   - 分析用户交互模式
+
+4. **辅助功能**
+   - 为视力障碍用户提供光标可视化
+   - 记录光标使用历史
+
+## 相关资源
+
+- [DXGI Desktop Duplication API](https://learn.microsoft.com/en-us/windows/win32/direct3ddxgi/desktop-dup-api)
+- [Qt6 Documentation](https://doc.qt.io/qt-6/)
+
+## 总结
+
+DxgiPointerMonitor 展示了如何使用 Windows DXGI Desktop Duplication API 捕获系统鼠标指针：
+
+- **实时捕获**：10ms 轮询间隔，低延迟
+- **多显示器支持**：自动发现和枚举所有输出
+- **形状解析**：支持彩色、单色和掩色三种格式
+- **变化检测**：使用哈希值智能检测形状变化
+- **资源管理**：使用 COM 智能指针和 RAII
+- **Qt6 集成**：现代化的跨平台 UI 框架
+- **图像保存**：支持 PNG 和 BMP 格式输出
+
+这个项目是学习 Windows DirectX 开发和系统级编程的实践，展示了如何访问和操作系统底层的图形系统。
