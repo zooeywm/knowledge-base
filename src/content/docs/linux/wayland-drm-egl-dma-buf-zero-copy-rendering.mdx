@@ -1,0 +1,514 @@
+---
+title: "Wayland DRM EGL DMA_BUF 零拷贝视频渲染"
+description: "基于 VA-API、DRM、EGL 和 DMA_BUF 的硬件加速视频零拷贝渲染实现"
+tags:
+  - vaapi
+  - wayland
+  - egl
+  - dma-buf
+  - 零拷贝
+  - 硬件加速
+---
+
+import { Steps } from "@astrojs/starlight/components";
+
+## 概述
+
+本文档详细介绍在 Wayland 环境下，如何使用 DRM、EGL 和 DMA_BUF 实现基于 VA-API 的硬件加速视频零拷贝渲染。通过这种方式，视频解码后直接在 GPU 显存中进行渲染，避免了 CPU 和 GPU 之间的数据拷贝，大幅提升渲染性能。
+
+## 技术架构
+
+整个渲染流程涉及以下几个核心技术组件：
+
+| 组件                                | 作用                           |
+| ----------------------------------- | ------------------------------ |
+| **DRM (Direct Rendering Manager)**  | 提供对 GPU 设备的直接访问      |
+| **VA-API (Video Acceleration API)** | 提供视频硬件加速解码接口       |
+| **EGL (Embedded Graphics Library)** | OpenGL 和本地窗口系统的中间层  |
+| **DMA-BUF**                         | Linux 内核的跨设备内存共享机制 |
+| **Wayland**                         | 现代化的显示服务器协议         |
+
+## 整体架构流程图
+
+```d2
+direction: down
+
+A: 视频文件
+B: FFmpeg 解码线程
+C: VA-API 硬件解码
+D: VASurface\nGPU 显存
+E: vaExportSurfaceHandle\n导出 DRM PRIME
+F: DMA-BUF\n文件描述符
+G: EGL_EXT_image_dma_buf_import\n创建 EGLImage
+H: glEGLImageTargetTexture2DOES\n绑定到 OpenGL 纹理
+I: OpenGL 渲染
+J: EGL SwapBuffers\n呈现到 Wayland 窗口
+
+A -> B
+B -> C
+C -> D
+D -> E
+E -> F
+F -> G
+G -> H
+H -> I
+I -> J
+```
+
+## 核心渲染流程
+
+### 1. DRM 设备初始化
+
+首先需要打开 DRM 渲染节点并初始化 VA-API：
+
+```cpp
+int drmFd = open("/dev/dri/renderD128", O_RDWR);
+if (drmFd < 0) {
+    qCritical("Failed to open DRM render node");
+    return nullptr;
+}
+
+VADisplay vaDisplay = vaGetDisplayDRM(drmFd);
+int major, minor;
+vaInitialize(vaDisplay, &major, &minor);
+```
+
+:::note[说明]
+`/dev/dri/renderD128` 是通用的渲染设备节点，实际路径可能因系统而异。使用 `renderD` 路径而非 `card` 路径可以避免需要 root 权限。
+:::
+
+### 2. FFmpeg + VA-API 硬件解码初始化
+
+配置 FFmpeg 使用 VA-API 进行硬件加速解码：
+
+```cpp
+// 分配 VA-API 硬件设备上下文
+hwDeviceCtx = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_VAAPI);
+
+AVHWDeviceContext *hwctx = (AVHWDeviceContext*)hwDeviceCtx->data;
+AVVAAPIDeviceContext *vactx = (AVVAAPIDeviceContext*)hwctx->hwctx;
+vactx->display = vaDisplay; // 关联上一步初始化的 VA display
+
+av_hwdevice_ctx_init(hwDeviceCtx);
+
+// 设置解码器使用硬件加速
+decoderCtx->get_format = getHwFormat;
+decoderCtx->hw_device_ctx = av_buffer_ref(hwDeviceCtx);
+```
+
+解码器格式回调函数确保使用 VA-API 格式：
+
+```cpp
+AVPixelFormat getHwFormat(AVCodecContext *ctx, const enum AVPixelFormat *pix_fmts) {
+    for (const enum AVPixelFormat *p = pix_fmts; *p != AV_PIX_FMT_NONE; p++) {
+        if (*p == AV_PIX_FMT_VAAPI) {
+            return *p;
+        }
+    }
+    return AV_PIX_FMT_NONE;
+}
+```
+
+### 3. Wayland 窗口和 EGL 初始化
+
+#### 3.1 Wayland 显示初始化
+
+```cpp
+// 从 Qt 窗口获取 native Wayland 资源
+QPlatformNativeInterface *native = QGuiApplication::platformNativeInterface();
+wl_display *wlDisplay = (wl_display*)native->nativeResourceForWindow("display", qWindow);
+wl_surface *wlSurface = (wl_surface*)native->nativeResourceForWindow("surface", qWindow);
+
+// 注册并获取 Wayland 全局对象
+wl_registry *registry = wl_display_get_registry(wlDisplay);
+wl_registry_add_listener(registry, &registryListener, this);
+wl_display_roundtrip(wlDisplay);
+```
+
+:::tip[注意]
+如果是纯 Wayland 应用（不使用 Qt），可以使用 `wl_display_connect(NULL)` 直接连接到默认 Wayland 显示服务器。
+:::
+
+#### 3.2 EGL 上下文初始化
+
+```cpp
+// 使用 Wayland 平台创建 EGL 显示
+eglDisplay = eglGetPlatformDisplay(EGL_PLATFORM_WAYLAND_KHR, wlDisplay, NULL);
+eglInitialize(eglDisplay, NULL, NULL);
+
+// 绑定 OpenGL ES API
+eglBindAPI(EGL_OPENGL_ES2_BIT);
+
+// 配置 EGL 属性
+EGLint configAttribs[] = {
+    EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
+    EGL_RED_SIZE, 8,
+    EGL_GREEN_SIZE, 8,
+    EGL_BLUE_SIZE, 8,
+    EGL_ALPHA_SIZE, 8,
+    EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
+    EGL_NONE
+};
+
+eglChooseConfig(eglDisplay, configAttribs, &config, 1, &numConfigs);
+
+// 创建 EGL 窗口和表面
+wl_egl_window *eglWindow = wl_egl_window_create(wlSurface, width, height);
+eglSurface = eglCreateWindowSurface(eglDisplay, config, (EGLNativeWindowType)eglWindow, NULL);
+
+// 创建 EGL 上下文
+EGLint ctxAttribs[] = {
+    EGL_CONTEXT_CLIENT_VERSION, 2,
+    EGL_NONE
+};
+eglContext = eglCreateContext(eglDisplay, config, EGL_NO_CONTEXT, ctxAttribs);
+eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext);
+```
+
+#### 3.3 查询 DMA-BUF 扩展函数
+
+零拷贝的关键在于使用 EGL 的 DMA-BUF 导入扩展：
+
+```cpp
+// 查询必要的 EGL 扩展函数
+eglCreateImageKHR = (PFNEGLCREATEIMAGEKHRPROC)
+    eglGetProcAddress("eglCreateImageKHR");
+glEGLImageTargetTexture2DOES = (PFNGLEGLIMAGETARGETTEXTURE2DOESPROC)
+    eglGetProcAddress("glEGLImageTargetTexture2DOES");
+eglDestroyImageKHR = (PFNEGLDESTROYIMAGEKHRPROC)
+    eglGetProcAddress("eglDestroyImageKHR");
+```
+
+### 4. 视频解码循环
+
+在独立的解码线程中持续解码视频帧：
+
+```cpp
+while (av_read_frame(inputCtx, &packet) >= 0) {
+    if (packet.stream_index == videoStream) {
+        // 发送包到解码器
+        avcodec_send_packet(decoderCtx, &packet);
+
+        // 接收解码后的帧
+        AVFrame *frame = av_frame_alloc();
+        while (avcodec_receive_frame(decoderCtx, frame) == 0) {
+            // 帧数据存储在 GPU 的 VASurface 中
+            // frame->data[3] 包含 VASurfaceID
+            renderer->queueFrame(frame);
+        }
+    }
+    av_packet_unref(&packet);
+}
+```
+
+:::tip[无锁队列]
+为了实现高性能的帧传递，使用 SPSC (Single Producer Single Consumer) 无锁队列连接解码线程和渲染线程，避免锁竞争开销。
+:::
+
+### 5. 核心：VA-API Surface 导出为 DMA-BUF
+
+这是零拷贝流程中最关键的一步，将 VA-API 的 Surface 直接导出为 DMA-BUF，无需进行 CPU 拷贝：
+
+```cpp
+VASurfaceID vaSurface = (uintptr_t)frame->data[3];
+
+// 导出 Surface 为 DRM PRIME 格式
+VADRMPRIMESurfaceDescriptor prime;
+vaExportSurfaceHandle(
+    vaDisplay, vaSurface,
+    VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
+    VA_EXPORT_SURFACE_READ_ONLY | VA_EXPORT_SURFACE_SEPARATE_LAYERS,
+    &prime
+);
+```
+
+`VADRMPRIMESurfaceDescriptor` 结构体包含：
+
+- `fourcc`: 像素格式 (NV12、XYUV 等)
+- `layers`: 各层的描述（Y、UV 分量等）
+- `objects`: DMA-BUF 文件描述符信息
+
+### 6. DMA-BUF 导入为 EGL 纹理
+
+将导出的 DMA-BUF 直接绑定到 OpenGL 纹理，实现零拷贝：
+
+#### 6.1 NV12 格式处理
+
+NV12 是最常见的 YUV 4:2:0 格式，包含 Y 和 UV 两个平面：
+
+```cpp
+EGLImage images[2];
+
+// Y 平面 (Luma)
+EGLint yAttribs[] = {
+    EGL_LINUX_DRM_FOURCC_EXT, DRM_FORMAT_R8,
+    EGL_WIDTH, prime.width,
+    EGL_HEIGHT, prime.height,
+    EGL_DMA_BUF_PLANE0_FD_EXT, prime.objects[prime.layers[0].object_index[0]].fd,
+    EGL_DMA_BUF_PLANE0_OFFSET_EXT, prime.layers[0].offset[0],
+    EGL_DMA_BUF_PLANE0_PITCH_EXT, prime.layers[0].pitch[0],
+    EGL_NONE
+};
+images[0] = eglCreateImageKHR(eglDisplay, EGL_NO_CONTEXT,
+                              EGL_LINUX_DMA_BUF_EXT, NULL, yAttribs);
+
+// UV 平面 (Chroma) - 尺寸为 Y 平面的一半
+EGLint uvAttribs[] = {
+    EGL_LINUX_DRM_FOURCC_EXT, DRM_FORMAT_GR88,
+    EGL_WIDTH, prime.width / 2,
+    EGL_HEIGHT, prime.height / 2,
+    EGL_DMA_BUF_PLANE0_FD_EXT, prime.objects[prime.layers[1].object_index[0]].fd,
+    EGL_DMA_BUF_PLANE0_OFFSET_EXT, prime.layers[1].offset[0],
+    EGL_DMA_BUF_PLANE0_PITCH_EXT, prime.layers[1].pitch[0],
+    EGL_NONE
+};
+images[1] = eglCreateImageKHR(eglDisplay, EGL_NO_CONTEXT,
+                              EGL_LINUX_DMA_BUF_EXT, NULL, uvAttribs);
+
+// 绑定到 OpenGL 纹理
+for (int i = 0; i < 2; ++i) {
+    glActiveTexture(GL_TEXTURE0 + i);
+    glBindTexture(GL_TEXTURE_2D, textures[i]);
+    glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, images[i]);
+}
+```
+
+#### 6.2 XYUV 格式处理
+
+XYUV 是打包格式，所有分量存储在一个平面：
+
+```cpp
+EGLint imgAttr[] = {
+    EGL_LINUX_DRM_FOURCC_EXT, DRM_FORMAT_XYUV8888,
+    EGL_WIDTH, prime.width,
+    EGL_HEIGHT, prime.height,
+    EGL_DMA_BUF_PLANE0_FD_EXT, prime.objects[prime.layers[0].object_index[0]].fd,
+    EGL_DMA_BUF_PLANE0_OFFSET_EXT, prime.layers[0].offset[0],
+    EGL_DMA_BUF_PLANE0_PITCH_EXT, prime.layers[0].pitch[0],
+    EGL_NONE
+};
+
+EGLImage image = eglCreateImageKHR(eglDisplay, EGL_NO_CONTEXT,
+                                    EGL_LINUX_DMA_BUF_EXT, NULL, imgAttr);
+
+glActiveTexture(GL_TEXTURE0);
+glBindTexture(GL_TEXTURE_2D, texture);
+glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, image);
+```
+
+### 7. OpenGL 渲染
+
+使用着色器将 YUV 纹理转换为 RGB 并渲染：
+
+#### 7.1 顶点着色器
+
+```glsl
+attribute vec4 aPosition;
+attribute vec2 aTexCoord;
+varying vec2 vTexCoord;
+uniform vec2 uScale;
+uniform vec2 uOffset;
+uniform vec2 uTexCoordScale;
+
+void main() {
+    gl_Position = aPosition;
+    vTexCoord = aTexCoord * uTexCoordScale * uScale + uOffset;
+}
+```
+
+#### 7.2 NV12 片段着色器
+
+```glsl
+precision mediump float;
+varying vec2 vTexCoord;
+uniform sampler2D uTexY;  // Y 平面
+uniform sampler2D uTexC;  // UV 平面
+
+void main() {
+    float y = texture2D(uTexY, vTexCoord).r;
+    vec2 uv = texture2D(uTexC, vTexCoord).rg - vec2(0.5, 0.5);
+
+    // YUV 转 RGB
+    float r = y + 1.402 * uv.y;
+    float g = y - 0.344 * uv.x - 0.714 * uv.y;
+    float b = y + 1.772 * uv.x;
+
+    gl_FragColor = vec4(r, g, b, 1.0);
+}
+```
+
+#### 7.3 渲染帧
+
+```cpp
+// 清屏
+glClear(GL_COLOR_BUFFER_BIT);
+
+// 绘制四边形
+glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+
+// 交换缓冲区
+eglSwapBuffers(eglDisplay, eglSurface);
+
+// 清理 EGLImage
+for (int i = 0; i < numImages; ++i) {
+    eglDestroyImageKHR(eglDisplay, images[i]);
+}
+
+// 关闭 DMA-BUF 文件描述符
+for (int i = 0; i < prime.num_objects; ++i) {
+    close(prime.objects[i].fd);
+}
+
+av_frame_free(&frame);
+```
+
+### 8. 宽高比适配
+
+根据视频和窗口的宽高比自动缩放和居中显示：
+
+```cpp
+float videoAspect = (float)frameWidth / (float)frameHeight;
+float displayAspect = (float)windowWidth / (float)windowHeight;
+
+float scaleX = 1.0, scaleY = 1.0;
+float offsetX = 0.0, offsetY = 0.0;
+
+if (videoAspect > displayAspect) {
+    scaleY = displayAspect / videoAspect;
+    offsetY = 0.5 * (1.0 - scaleY);
+} else {
+    scaleX = videoAspect / displayAspect;
+    offsetX = 0.5 * (1.0 - scaleX);
+}
+
+// 传递给着色器
+glUniform2f(uScaleLoc, scaleX, scaleY);
+glUniform2f(uOffsetLoc, offsetX, offsetY);
+```
+
+## 完整渲染流程总结
+
+<Steps>
+
+1. **初始化 DRM 设备**
+   打开 `/dev/dri/renderD128`，获取 `VADisplay`
+
+2. **配置 FFmpeg + VA-API**
+   设置硬件设备上下文，关联 `VADisplay`
+
+3. **初始化 Wayland + EGL**
+   创建 Wayland 窗口，查询 DMA-BUF 扩展函数
+
+4. **解码视频帧**
+   在独立线程中持续解码，将帧放入队列
+
+5. **导出 VASurface**
+   使用 `vaExportSurfaceHandle` 导出为 DRM PRIME
+
+6. **创建 EGLImage**
+   通过 `eglCreateImageKHR` 导入 DMA-BUF
+
+7. **绑定 OpenGL 纹理**
+   使用 `glEGLImageTargetTexture2DOES` 绑定纹理
+
+8. **渲染到屏幕**
+   执行 OpenGL 渲染并交换缓冲区
+
+</Steps>
+
+## 关键技术细节
+
+### 为什么是零拷贝？
+
+传统渲染流程：
+
+```
+[视频文件] → [CPU 解码] → [内存缓冲区] → [GPU 传输] → [渲染]
+                        ↑ CPU-GPU 数据拷贝
+```
+
+零拷贝流程：
+
+```
+[视频文件] → [GPU 解码] → [VASurface] → [DMA-BUF] → [OpenGL 纹理] → [渲染]
+                                      ↑ 无拷贝，直接共享显存
+```
+
+DMA-BUF 是 Linux 内核提供的跨设备内存共享机制，允许不同的设备（如 VA-API 和 OpenGL）共享同一块物理内存，无需进行数据拷贝。
+
+### 常见像素格式
+
+| 格式         | 说明                    | 应用场景                |
+| ------------ | ----------------------- | ----------------------- |
+| **NV12**     | Y 平面 + 交错的 UV 平面 | 最常见的 YUV 4:2:0 格式 |
+| **XYUV8888** | 打包的 YUV 4:4:4 格式   | 高质量视频              |
+| **P010**     | 10-bit NV12             | HDR 视频                |
+
+### 性能优化要点
+
+1. **多线程架构**
+   - 解码线程：专注于视频解码
+   - 渲染线程：专注于 GPU 渲染
+   - 通过无锁队列（SPSC）传递帧
+
+2. **VSync 控制**
+
+   ```cpp
+   eglSwapInterval(eglDisplay, 0); // 禁用垂直同步，最大化帧率
+   ```
+
+3. **帧队列管理**
+   ```cpp
+   // 使用固定大小的环形队列
+   // 当队列满时丢弃最旧的帧，避免阻塞解码器
+   frameQueue.forceEnqueue(frame);
+   ```
+
+## 调试和常见问题
+
+### 检查 DMA-BUF 支持
+
+```bash
+# 检查 EGL 扩展支持
+eglinfo | grep -i dma_buf
+
+# 检查 VA-API 支持的格式
+ vainfo
+```
+
+### 常见错误
+
+| 错误                         | 原因               | 解决方案                        |
+| ---------------------------- | ------------------ | ------------------------------- |
+| `EGL_NO_DISPLAY`             | Wayland 连接失败   | 检查 `WAYLAND_DISPLAY` 环境变量 |
+| `eglCreateImageKHR` 失败     | DMA-BUF 扩展不支持 | 更新 GPU 驱动或 Mesa            |
+| `vaExportSurfaceHandle` 失败 | Surface 格式不支持 | 检查 VA-API 支持的像素格式      |
+
+### 性能分析
+
+```bash
+# 查看 GPU 使用率
+nvidia-smi  # NVIDIA GPU
+intel_gpu_top  # Intel GPU
+
+# 查看 CPU 使用率
+htop
+```
+
+## 相关资源
+
+- [VA-API 官方文档](https://github.com/intel/libva)
+- [EGL_EXT_image_dma_buf_import 规范](https://www.khronos.org/registry/EGL/extensions/EXT/EGL_EXT_image_dma_buf_import.txt)
+- [DRM 开发者指南](https://dri.freedesktop.org/docs/drm/)
+- [Wayland 协议文档](https://wayland.app/protocols/)
+
+## 总结
+
+通过结合 DRM、VA-API、EGL 和 DMA-BUF 技术，我们实现了在 Wayland 环境下的高性能视频零拷贝渲染：
+
+- **硬件加速解码**：VA-API 利用 GPU 进行视频解码
+- **零数据拷贝**：DMA-BUF 直接共享显存
+- **低延迟**：避免了 CPU-GPU 数据传输
+- **低 CPU 占用**：解码和渲染主要在 GPU 上完成
+
+这种架构适用于需要高性能视频播放的应用，如视频播放器、视频会议系统、视频监控等场景。
