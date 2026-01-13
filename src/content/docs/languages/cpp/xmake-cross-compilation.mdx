@@ -1,0 +1,356 @@
+---
+title: "Xmake 跨平台编译指南"
+description: "使用 Xmake 进行 Linux 到 Windows 的 Qt 应用程序交叉编译"
+tags:
+  - xmake
+  - cpp
+  - cross-compilation
+  - qt
+---
+
+import { Steps } from "@astrojs/starlight/components";
+
+[代码示例](https://github.com/zooeywm/playground/tree/main/cpp)
+
+## 什么是交叉编译
+
+### 定义
+
+交叉编译（Cross-compilation）是指在一个平台上生成可以在另一个平台上运行的程序。例如，在 Linux 系统上编译出可以在 Windows 系统上运行的可执行文件。
+
+### 为什么需要交叉编译
+
+- **开发环境便利性**：在熟悉的 Linux 环境下进行开发
+- **自动化构建**：在 CI/CD 流程中使用 Linux 服务器构建 Windows 程序
+- **资源优化**：利用 Linux 服务器的强大算力进行编译
+
+## 项目配置示例
+
+以下是一个典型的 xmake.lua 配置，用于构建 Windows 上的 Qt 应用程序：
+
+```lua title="xmake.lua"
+set_project("mixed_project")
+set_version("0.1.0")
+
+add_rules("mode.debug", "mode.release")
+
+target("dxgi_pointer_monitor")
+    set_kind("binary")
+
+    -- 指定目标平台和架构
+    set_plat("mingw")
+    set_arch("x86_64")
+
+    -- 添加 Qt 规则
+    add_rules("qt.quickapp", "qt.moc")
+
+    -- 添加源文件
+    add_files("src/dxgi_pointer_monitor/*.cpp")
+    add_files("src/dxgi_pointer_monitor/*.h")
+
+    -- 添加 Windows 特定的系统库
+    add_syslinks("d3d11")
+```
+
+### 配置说明
+
+| 配置项           | 说明         | 示例值                      |
+| ---------------- | ------------ | --------------------------- |
+| `set_plat()`     | 设置目标平台 | `mingw`、`windows`、`linux` |
+| `set_arch()`     | 设置目标架构 | `x86_64`、`x86`             |
+| `add_rules()`    | 添加构建规则 | `qt.quickapp`、`qt.moc`     |
+| `add_syslinks()` | 链接系统库   | `d3d11`、`user32`           |
+
+## 准备工作
+
+### 1. 安装 MinGW 工具链
+
+在 Linux 上需要安装 MinGW 交叉编译工具链：
+
+```bash
+# Ubuntu/Debian
+sudo apt-get install mingw-w64 g++-mingw-w64-x86-64
+
+# Arch Linux
+sudo pacman -S mingw-w64-gcc
+```
+
+### 2. 下载 Qt for MinGW
+
+需要下载两个版本的 Qt：
+
+- **目标版**：用于最终程序运行的 MinGW 版 Qt
+- **主机版**：用于构建工具的 GCC 版 Qt
+
+从 [ustc 镜像](https://mirrors.ustc.edu.cn/qtproject/official_releases/online_installers/) 下载 `qt-online-installer-windows-x64-online.exe`，在 Windows 上运行 `qt-online-installer-windows-x64-online.exe --mirror https://mirrors.ustc.edu.cn/qtproject` ，选择 MinGW 组件
+
+将下载的 Qt 目录复制到 Linux 系统，例如：
+
+```bash
+~/Qt/6.8.3/mingw_64    # 目标版
+~/Qt/6.8.3/gcc_64       # 主机版
+```
+
+:::tip[为什么需要两个 Qt 版本？]
+交叉编译 Qt 应用时：
+
+- **目标版（mingw_64）**：包含运行时库和头文件，用于链接最终的可执行文件
+- **主机版（gcc_64）**：包含构建工具（moc、rcc、uic 等），这些工具需要在主机上运行
+  :::
+
+## 配置交叉编译环境
+
+使用以下命令配置 xmake 的交叉编译环境：
+
+```bash
+xmake f -p mingw -a x86_64 \
+    --qt=~/Qt/6.8.3/mingw_64 \
+    --qt_host=~/Qt/6.8.3/gcc_64
+```
+
+### 参数详解
+
+| 参数        | 说明             | 示例                  |
+| ----------- | ---------------- | --------------------- |
+| `-p`        | 指定目标平台     | `mingw`               |
+| `-a`        | 指定目标架构     | `x86_64`              |
+| `--qt`      | 指定目标 Qt 目录 | `~/Qt/6.8.3/mingw_64` |
+| `--qt_host` | 指定主机 Qt 目录 | `~/Qt/6.8.3/gcc_64`   |
+
+:::note[配置持久化]
+配置命令只会影响当前项目，配置信息会保存在项目的 `.xmake` 目录中。
+:::
+
+## 完整编译流程
+
+<Steps>
+
+1. **生成编译数据库（可选）**
+
+   生成 `compile_commands.json` 以支持 IDE 的代码补全和导航：
+
+   ```bash
+   xmake project -k compile_commands
+   ```
+
+2. **配置构建模式**
+
+   选择 debug 或 release 模式：
+
+   ```bash
+   # Debug 模式
+   xmake f -m debug
+
+   # Release 模式
+   xmake f -m release
+   ```
+
+3. **配置交叉编译环境**
+
+   设置 MinGW 平台和 Qt 路径：
+
+   ```bash
+   xmake f -p mingw -a x86_64 \
+       --qt=~/Qt/6.8.3/mingw_64 \
+       --qt_host=~/Qt/6.8.3/gcc_64
+   ```
+
+4. **编译项目**
+
+   编译指定的 target：
+
+   ```bash
+   xmake build dxgi_pointer_monitor
+   ```
+
+   或者编译所有 target：
+
+   ```bash
+   xmake build -a
+   ```
+
+5. **查看输出**
+
+   编译生成的可执行文件位于：
+
+   ```bash
+   build/mingw/x86_64/release/dxgi_pointer_monitor.exe
+   ```
+
+</Steps>
+
+## 常用 Xmake 命令
+
+### 项目配置
+
+```bash
+# 切换模式（debug/release）
+xmake f -m debug
+
+# 指定 Qt 目录（本地编译）
+xmake f --qt=~/Qt/6.8.3
+
+# 配置 MinGW 跨平台编译
+xmake f -p mingw -a x86_64 --qt=~/Qt/6.8.3
+
+# 配置 MinGW 跨平台编译（带 Qt 工具链）
+xmake f -p mingw -a x86_64 \
+    --qt=~/Qt/6.8.3/mingw_64 \
+    --qt_host=~/Qt/6.8.3/gcc_64
+```
+
+### 构建命令
+
+```bash
+# 编译指定 target
+xmake build <target>
+
+# 编译所有 target
+xmake build -a
+
+# 编译全部（同上）
+xmake build --all
+```
+
+### 运行命令
+
+```bash
+# 运行指定 target
+xmake run <target>
+
+# 在指定工作目录运行
+xmake run -w /path/to
+```
+
+### 项目工具
+
+```bash
+# 生成 compile_commands.json（用于 LSP/IDE）
+xmake project -k compile_commands
+```
+
+## 常见问题与解决方案
+
+### 问题 1：找不到 Qt 模块
+
+**错误信息**：
+
+```
+error: cannot find qt module
+```
+
+**解决方案**：
+
+确保 `--qt` 参数指向正确的 Qt 目录，并且目录中包含以下结构：
+
+```
+~/Qt/6.8.3/mingw_64/
+├── bin/
+├── include/
+├── lib/
+├── mkspecs/
+└── plugins/
+```
+
+验证 Qt 安装：
+
+```bash
+ls ~/Qt/6.8.3/mingw_64/bin/qmake
+ls ~/Qt/6.8.3/mingw_64/lib/cmake/Qt6/
+```
+
+### 问题 2：Moc 工具无法运行
+
+**错误信息**：
+
+```
+error: cannot execute moc: Exec format error
+```
+
+**解决方案**：
+
+这通常发生在主机版 Qt 配置错误时。确保 `--qt_host` 参数指向 Linux 可执行版本的 Qt：
+
+```bash
+# 检查主机 Qt 的工具是否是 Linux 可执行文件
+file ~/Qt/6.8.3/gcc_64/bin/moc
+# 应该输出: ELF 64-bit LSB executable
+```
+
+:::tip[验证主机 Qt]
+主机 Qt（`gcc_64`）必须与编译主机同平台（Linux），目标 Qt（`mingw_64`）必须与运行平台同平台（Windows）。
+:::
+
+### 问题 3：链接错误 - 找不到系统库
+
+**错误信息**：
+
+```
+undefined reference to `Direct3D11CreateDevice'
+```
+
+**解决方案**：
+
+确保在 `xmake.lua` 中正确添加了 Windows 系统库：
+
+```lua
+add_syslinks("d3d11", "user32", "gdi32")
+```
+
+## 高级配置
+
+### 全局配置 Qt 路径
+
+如果多个项目使用相同的 Qt 版本，可以在 `~/.xmake/global.conf` 中配置全局路径：
+
+```lua
+-- ~/.xmake/global.conf
+set_config("qt", "~/Qt/6.8.3/mingw_64")
+set_config("qt_host", "~/Qt/6.8.3/gcc_64")
+```
+
+### 多平台配置
+
+支持同时配置多个平台，通过 target 覆盖：
+
+```lua
+-- 默认使用 Linux
+set_plat("linux")
+set_arch("x86_64")
+
+-- 为特定 target 设置 Windows
+target("dxgi_pointer_monitor")
+    on_config(function (target)
+        if target:is_plat("mingw") then
+            target:add("syslinks", "d3d11", "user32")
+        end
+    end)
+```
+
+### 条件编译
+
+根据平台添加不同的源文件或依赖：
+
+```lua
+target("myapp")
+    add_files("src/*.cpp")
+
+    -- Windows 特定文件
+    if is_plat("mingw", "windows") then
+        add_files("src/platform/windows/*.cpp")
+        add_syslinks("user32", "gdi32")
+    end
+
+    -- Linux 特定文件
+    if is_plat("linux") then
+        add_files("src/platform/linux/*.cpp")
+        add_syslinks("pthread", "dl")
+    end
+```
+
+## 参考资源
+
+- [Xmake 官方文档](https://xmake.io/)
+- [Xmake Qt 模块文档](https://xmake.io/examples/cpp/graphics/qt.html#qt6-example)
+- [Qt 官方文档](https://doc.qt.io/)
+- [MinGW-w64 交叉编译](https://www.mingw-w64.org/)
