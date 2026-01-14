@@ -1,0 +1,16 @@
+---
+title: "Rust 问题解决"
+---
+
+## no_std 遇到 rust-analyzer 检查 test 错误
+
+no_std Can't find crate for 'test'
+
+解决方法：`Cargo.toml` 中添加
+
+```toml
+[[bin]]
+name = "app"
+test = false
+bench = false
+```

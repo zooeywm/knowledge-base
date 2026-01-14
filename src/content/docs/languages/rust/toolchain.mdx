@@ -1,0 +1,62 @@
+---
+title: "Rust 工具链"
+---
+
+## [rustup](https://rust-lang.github.io/rustup/)
+
+Channels: Rust 有 stable, beta, nightly 三个 channel
+
+```bash title="安装 nightly"
+$ rustup toolchain install nightly
+info: syncing channel updates for 'nightly'
+info: downloading toolchain manifest
+info: downloading component 'rustc'
+info: downloading component 'rust-std'
+info: downloading component 'rust-docs'
+info: downloading component 'cargo'
+info: installing component 'rustc'
+info: installing component 'rust-std'
+info: installing component 'rust-docs'
+info: installing component 'cargo'
+
+  nightly installed: rustc 1.9.0-nightly (02310fd31 2016-03-19)
+```
+
+```bash title="设置为默认"
+$ rustup default nightly
+info: using existing install for 'nightly'
+info: default toolchain set to 'nightly'
+
+  nightly unchanged: rustc 1.9.0-nightly (02310fd31 2016-03-19)
+```
+
+```bash title="添加 Components"
+# 安装并指定添加 component
+rustup toolchain install nightly --component rust-docs
+# 为当前 toolchain 添加 component
+rustup component add rust-docs
+```
+
+```bash title="交叉编译"
+$ rustup target add arm-linux-androideabi
+info: downloading component 'rust-std' for 'arm-linux-androideabi'
+info: installing component 'rust-std' for 'arm-linux-androideabi'
+
+$ cargo build --target=arm-linux-androideabi
+```
+
+## [standard library](https://doc.rust-lang.org/std/index.html)
+
+## [cargo](https://doc.rust-lang.org/cargo/index.html)
+
+[.cargo 配置文件](https://doc.rust-lang.org/cargo/reference/config.html)
+
+## [rustdoc](https://doc.rust-lang.org/rustdoc/index.html)
+
+## [rustc](https://doc.rust-lang.org/rustc/index.html)
+
+## [compiler error index](https://doc.rust-lang.org/error-index.html)
+
+## [reference](https://doc.rust-lang.org/reference/)
+
+[attributes 列表](https://doc.rust-lang.org/reference/attributes.html#built-in-attributes-index)
