@@ -1,0 +1,33 @@
+---
+title: "rcore"
+---
+
+## 实用工具
+
+```bash
+# 文件格式
+$ file target/riscv64gc-unknown-none-elf/debug/os
+target/riscv64gc-unknown-none-elf/debug/os: ELF 64-bit LSB executable, UCB RISC-V, ......
+
+# 文件头信息
+$ rust-readobj -h target/riscv64gc-unknown-none-elf/debug/os
+   File: target/riscv64gc-unknown-none-elf/debug/os
+   Format: elf64-littleriscv
+   Arch: riscv64
+   AddressSize: 64bit
+   ......
+   Type: Executable (0x2)
+   Machine: EM_RISCV (0xF3)
+   Version: 1
+   Entry: 0x0
+   ......
+   }
+
+# 反汇编导出汇编程序
+$ rust-objdump -S target/riscv64gc-unknown-none-elf/debug/os
+   target/riscv64gc-unknown-none-elf/debug/os:       file format elf64-littleriscv
+```
+
+## 项目管理
+
+工作空间： `taplo.toml` 指定 toml 格式化配置；`rustfmt` 指定 rust 格式化配置；`rust-toolchain.toml` 指定项目需要具有的工具链；`xtask` 编写构建流程；`.cargo/config.toml` 配置 alias 等。如果多个 member 具有不同的 target，就不能在工作空间的 `.cargo/config.toml` 里面配置 target 而是为每个 member 单独添加配置，但注意`.cargo` 只有当前工作目录能读取到，从 workspace 工作目录执行 cargo 命令是读不到 member 的`.cargo/config.toml` 的，于是需要在 `xtask` 命令行应用里面编写需要构建的 member 及其构建 flags，env 等等
