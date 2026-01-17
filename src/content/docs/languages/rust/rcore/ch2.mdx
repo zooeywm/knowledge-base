@@ -1,0 +1,43 @@
+---
+title: "第二章"
+---
+
+## 特权级机制
+
+qemu-system-riscv64 是以 Machine 级别运行的模拟器，而 qemu-riscv64 是以 Supervisor 级别，模拟了一个 linux 系统来运行的模拟器
+
+因此只要我们的系统调用接口遵循 linux 接口规范，User 程序就可以直接用 qemu-riscv64 来运行
+
+```bash
+❯ qemu-riscv64 ./03_priv_inst
+Hello, user!
+[TRACE][user] text [0x80400000, 0x80404000)
+[DEBUG][user] .rodata [0x80404000, 0x80406000)
+[INFO][user] .data [0x80406000, 0x80406000)
+[WARN][user] .bss [0x80406000, 0x80406000)
+[ERROR][user] This is an error log
+[INFO][user] Sleep 500ms
+[INFO][user] Sleep 100000us(100ms)
+[WARN][user] Try to access privileged CSR in U mode, kernel should kill this application!
+zsh: illegal hardware instruction (core dumped)  qemu-riscv64 ./03_priv_inst
+❯ qemu-riscv64 ./00_hello_world
+Hello, user!
+[TRACE][user] text [0x80400000, 0x80402000)
+[DEBUG][user] .rodata [0x80402000, 0x80403000)
+[INFO][user] .data [0x80403000, 0x80403000)
+[WARN][user] .bss [0x80403000, 0x80403000)
+[ERROR][user] This is an error log
+[INFO][user] Sleep 500ms
+[INFO][user] Sleep 100000us(100ms)
+[INFO][user] Hello, world!
+```
+
+## no_std 全局静态变量
+
+因为 `no_std` 下没有线程概念，无法做 `local_thread`，只能用自旋的全局可变变量，可以使用送 `lazy_static` 库提供的 `spin_no_std` feature
+
+## 全部 cpu 架构的 linux syscall 对照表
+
+https://gpages.juszkiewicz.com.pl/syscalls-table/syscalls.html
+
+单独 riscv 的：https://jborza.com/post/2021-05-11-riscv-linux-syscalls/
