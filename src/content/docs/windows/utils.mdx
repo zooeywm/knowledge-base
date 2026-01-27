@@ -12,3 +12,15 @@ tags:
 ## Windows 激活
 
 [Microsoft-Activation-Scripts](https://github.com/massgravel/Microsoft-Activation-Scripts)
+
+## Windows Smart App blocked an app that may be unsafe in Windows 11
+
+https://www.youtube.com/watch?v=xiIAvXF_FuE
+
+Go to Settings -> Privacy & Security -> Windows Security -> App & browser control
+
+Switch the `On` to `Off`
+
+如果想主动打开它,从设置界面是无效的,需要修改注册表:
+
+`Computer\HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\CI\Policy` 创建 DWORD `VerifiedAndReputablePolicyState` 值为1
