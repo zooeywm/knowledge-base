@@ -140,7 +140,6 @@ faillock --user <用户名> --reset
 
 ## Ubuntu: openssl version mismatch built against 30000020 you have 30400000
 
-
 ```shell
 sudo apt-get remove openssh-server openssh-client --purge -y
 sudo mv /etc/ld.so.cache /etc/ld.so.cache_bak
@@ -157,3 +156,11 @@ sudo apt install openssh-server
 sudo vmware-networks --stop
 sudo vmware-networks --start
 ```
+
+或者
+
+运行 `vmware-netcfg` 然后将 vmnet0 -> Bridged 的 Bridged to 由 Automatikc 改为具体的网卡比如 `wlp2s0 (WiFi)`
+
+然后运行 `sudo systemctl restart vmware-networks.service`
+
+并在虚拟机里将网络禁用再启用，即可
