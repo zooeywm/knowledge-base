@@ -1,0 +1,585 @@
+---
+title: Linux 虚拟屏方案对比：VKMS、EVDI、dummy 与 Wayland 虚拟输出
+description: 对比 Linux 下 VKMS、EVDI、Xorg dummy 以及 Wayland 虚拟屏方案的定位、架构、优缺点与适用场景。
+---
+
+# Linux 虚拟屏方案对比：VKMS、EVDI、dummy 与 Wayland 虚拟输出
+
+Linux 下“虚拟屏”不是一个单一技术，而是多个层次的方案：
+
+- 内核 DRM/KMS 层：`vkms`
+- 内核 DRM + 用户态驱动协作层：`evdi`
+- Xorg 层：`dummy`
+- Wayland 合成器层：headless backend / virtual output / remote desktop backend
+
+它们看起来都能“制造一个显示器”，但本质完全不同。
+
+---
+
+## 总览
+
+| 方案             | 所在层级                   |     是否 DRM/KMS 设备 | 是否依赖 Xorg | 是否适合 Wayland | 主要用途                            |
+| ---------------- | -------------------------- | --------------------: | ------------: | ---------------: | ----------------------------------- |
+| VKMS             | Linux kernel DRM/KMS       |                    是 |            否 |         部分适合 | DRM/KMS 测试、无物理显示器场景      |
+| EVDI             | Linux kernel DRM + libevdi |                    是 |            否 |           有限制 | DisplayLink、虚拟显示、用户态接收帧 |
+| Xorg dummy       | Xorg DDX driver            |                    否 |            是 |               否 | X11 伪显示、CI、老式 headless X     |
+| Wayland 虚拟输出 | Wayland compositor         | 通常不是独立 DRM 设备 |            否 |               是 | 远程桌面、无头合成器、虚拟会话      |
+
+---
+
+## 1. VKMS
+
+`VKMS` 全称是：
+
+```text
+Virtual Kernel Mode Setting
+```
+
+它是 Linux 内核里的一个软件 DRM/KMS 驱动。
+
+官方定位是：
+
+> software-only model of a KMS driver
+
+也就是说，VKMS 模拟的是一个 KMS 显示设备，而不是一个真实 GPU。
+
+---
+
+### 1.1 VKMS 位于哪一层
+
+```text
+Userspace
+  ↓
+libdrm / compositor / Xorg
+  ↓
+DRM ioctl
+  ↓
+VKMS kernel driver
+  ↓
+software KMS model
+```
+
+VKMS 出现在 `/dev/dri/cardX` 中，用户态可以像访问普通 DRM 设备一样访问它。
+
+常见检查方式：
+
+```bash
+lsmod | grep vkms
+ls /dev/dri/
+modetest -M vkms
+```
+
+加载：
+
+```bash
+sudo modprobe vkms
+```
+
+卸载：
+
+```bash
+sudo modprobe -r vkms
+```
+
+---
+
+### 1.2 VKMS 解决什么问题
+
+VKMS 主要解决：
+
+- 没有真实显示硬件时测试 DRM/KMS
+- 在 headless 机器上模拟 KMS 输出
+- 给 IGT、DRM 测试提供软件显示设备
+- 让一部分依赖 KMS 的程序可以在无屏环境运行
+
+---
+
+### 1.3 VKMS 的优点
+
+优点：
+
+- 在内核主线中
+- 架构干净
+- 是标准 DRM/KMS 设备
+- 适合测试 DRM ioctl、KMS atomic、plane、CRTC、connector 等概念
+- 不依赖 Xorg
+- 适合学习 Linux 显示子系统底层结构
+
+---
+
+### 1.4 VKMS 的限制
+
+限制：
+
+- 它不是完整 GPU
+- 不提供真实硬件加速
+- 动态热插拔、动态多输出、动态模式配置能力有限
+- 主要面向测试，而不是完整远程桌面产品
+- 对 Wayland 合成器是否好用，取决于具体 compositor 对 headless / DRM backend 的支持
+
+尤其要注意：
+
+VKMS 的目标不是“做一个成熟虚拟显示产品”，而是“提供一个软件 KMS 模型”。
+
+---
+
+### 1.5 VKMS 适合什么时候用
+
+适合：
+
+- 学习 DRM/KMS
+- 测试 KMS 代码
+- 无显示器环境跑一部分图形栈测试
+- 做 compositor / DRM 相关实验
+- 研究 `modetest`、`drm_info`、IGT
+
+不太适合：
+
+- 生产级远程桌面虚拟显示
+- 动态添加/删除多个虚拟屏
+- 模拟复杂真实显示器行为
+- 需要用户态接收每一帧图像的场景
+
+---
+
+## 2. EVDI
+
+`EVDI` 全称是：
+
+```text
+Extensible Virtual Display Interface
+```
+
+它最初来自 DisplayLink，用于 Linux 下 USB 显示扩展坞/USB 显示适配器。
+
+EVDI 由两部分组成：
+
+```text
+evdi kernel module
+libevdi userspace library
+```
+
+---
+
+### 2.1 EVDI 位于哪一层
+
+```text
+Application / DisplayLink user mode driver
+  ↓
+libevdi
+  ↓
+evdi kernel module
+  ↓
+DRM subsystem
+  ↓
+virtual display
+```
+
+它会创建 DRM 设备，用户态程序可以通过 `libevdi` 管理虚拟显示，并接收显示更新。
+
+---
+
+### 2.2 EVDI 解决什么问题
+
+EVDI 解决的是：
+
+- 创建可由用户态程序控制的虚拟显示
+- 让用户态程序接收虚拟屏幕更新
+- 支撑 DisplayLink 这类 USB 显示方案
+- 为虚拟显示、远程显示、屏幕扩展提供基础设施
+
+和 VKMS 不同，EVDI 更强调：
+
+```text
+用户态程序参与虚拟显示管理和帧传输
+```
+
+---
+
+### 2.3 EVDI 的优点
+
+优点：
+
+- 可以动态创建虚拟显示
+- 用户态可通过 `libevdi` 接收显示更新
+- 可被标准 DRM 工具识别
+- 适合 DisplayLink 类型的 USB 显示设备
+- 比 VKMS 更接近“虚拟显示产品化接口”
+
+---
+
+### 2.4 EVDI 的限制
+
+限制：
+
+- 不是 Linux 内核主线驱动
+- 需要单独编译或安装 DKMS 模块
+- 内核版本兼容性需要维护
+- Wayland 下支持情况依赖 compositor 和桌面环境
+- API 稳定性不如内核主线接口
+- 作为虚拟显示方案时，需要自己处理用户态数据流
+- 由于 X11 需要至少有一个 Provider 具有 Source Output 能力，KVM 虚拟机中默认显卡 Provider 0 是 0x0 的能力，我们无法切换到 evdi 的 xrandr provider
+
+EVDI 比 VKMS 更产品化，但也更依赖外部模块和用户态配套。
+
+---
+
+### 2.5 EVDI 适合什么时候用
+
+适合：
+
+- DisplayLink / USB 显示方向
+- 希望用户态接收虚拟屏幕帧
+- 需要动态虚拟显示设备
+- 远程桌面、虚拟显示、屏幕扩展方向的实验
+
+不太适合：
+
+- 只想学习标准内核 DRM/KMS
+- 不想维护 DKMS 模块
+- 追求纯主线内核方案
+- 只需要简单 headless X11
+
+---
+
+## 3. Xorg dummy
+
+`dummy` 通常指：
+
+```text
+xf86-video-dummy
+```
+
+也就是 Xorg 的 dummy video driver。
+
+它不是内核 DRM/KMS 驱动，而是 Xorg 层的伪显示驱动。
+
+---
+
+### 3.1 dummy 位于哪一层
+
+```text
+X11 application
+  ↓
+Xorg server
+  ↓
+dummy video driver
+  ↓
+software framebuffer
+```
+
+它通常通过 Xorg 配置文件创建一个虚拟屏幕。
+
+示例：
+
+```conf
+Section "Device"
+    Identifier  "DummyDevice"
+    Driver      "dummy"
+EndSection
+
+Section "Monitor"
+    Identifier  "DummyMonitor"
+    HorizSync   28.0-80.0
+    VertRefresh 48.0-75.0
+EndSection
+
+Section "Screen"
+    Identifier "DummyScreen"
+    Device     "DummyDevice"
+    Monitor    "DummyMonitor"
+    DefaultDepth 24
+    SubSection "Display"
+        Depth 24
+        Modes "1920x1080"
+    EndSubSection
+EndSection
+```
+
+---
+
+### 3.2 dummy 解决什么问题
+
+dummy 主要解决：
+
+- 无显示器环境运行 Xorg
+- CI 中跑 X11 程序
+- 服务器上运行依赖 X11 的旧程序
+- 简单虚拟桌面
+
+---
+
+### 3.3 dummy 的优点
+
+优点：
+
+- 简单
+- 对 X11 老程序友好
+- 不需要 DRM/KMS 虚拟设备
+- 配合 `x11vnc`、`xpra`、`VNC` 等容易搭建 headless 桌面
+
+---
+
+### 3.4 dummy 的限制
+
+限制非常明显：
+
+- 只属于 Xorg 世界
+- 不适用于原生 Wayland
+- 不是 DRM/KMS 设备
+- 不能很好模拟现代 Linux 显示栈
+- 与 KMS、Wayland、dma-buf、atomic modesetting 关系较弱
+
+dummy 更像是旧时代 X11 headless 方案，不适合作为现代 Wayland/DRM 虚拟屏主线。
+
+---
+
+## 4. Wayland 虚拟屏
+
+Wayland 下没有一个统一的“虚拟显示器驱动”概念。
+
+Wayland 显示输出通常由 compositor 管理。
+
+因此，Wayland 虚拟屏更准确地说是：
+
+```text
+compositor-level virtual output
+```
+
+而不是一个统一的 Linux kernel 设备。
+
+---
+
+### 4.1 Wayland 虚拟屏位于哪一层
+
+```text
+Wayland client
+  ↓
+Wayland compositor
+  ↓
+backend
+    ├── DRM backend
+    ├── headless backend
+    ├── RDP backend
+    ├── VNC backend
+    └── virtual output
+```
+
+不同 compositor 的能力不同。
+
+例如：
+
+- Weston 有 headless、RDP、VNC 等 backend
+- wlroots 系 compositor 通常有 headless backend
+- GNOME/Mutter、KWin 的远程桌面能力由各自 compositor 实现
+- 有些虚拟输出不会出现在 `/dev/dri/cardX`
+- 有些只是 compositor 内部的 output 对象
+
+---
+
+### 4.2 Wayland 虚拟屏解决什么问题
+
+Wayland 虚拟屏主要解决：
+
+- 无头 Wayland 会话
+- 远程桌面输出
+- compositor 测试
+- 虚拟输出录制
+- Wayland-only 环境下不依赖 Xorg 的虚拟显示
+
+---
+
+### 4.3 Wayland 虚拟屏的优点
+
+优点：
+
+- 更符合现代 Linux 桌面架构
+- 不需要 Xorg dummy
+- 可以直接服务 Wayland client
+- 适合远程桌面、headless compositor、自动化测试
+- 可以与 PipeWire、xdg-desktop-portal、RDP/VNC backend 结合
+
+---
+
+### 4.4 Wayland 虚拟屏的限制
+
+限制：
+
+- 没有统一标准接口
+- 强依赖具体 compositor
+- 不一定暴露 DRM/KMS 设备
+- 不一定能被 `xrandr`、`modetest` 看到
+- 截屏、捕获、编码路径由 compositor 决定
+- 对“像真实显示器一样热插拔”的支持不统一
+
+所以 Wayland 虚拟屏不能简单理解为：
+
+```text
+Wayland 版本的 dummy
+```
+
+它更像是 compositor 内部的虚拟输出能力。
+
+---
+
+## 5. 四种方案的本质区别
+
+### 5.1 从层级看
+
+```text
+Kernel DRM/KMS:
+  VKMS
+  EVDI
+
+Xorg:
+  dummy
+
+Wayland compositor:
+  headless backend
+  virtual output
+  remote desktop backend
+```
+
+---
+
+### 5.2 从是否是真正 DRM 设备看
+
+| 方案             | 是否出现在 `/dev/dri/cardX` | 是否可用 `modetest` 查看 |
+| ---------------- | --------------------------: | -----------------------: |
+| VKMS             |                          是 |                       是 |
+| EVDI             |                          是 |                   通常是 |
+| dummy            |                          否 |                       否 |
+| Wayland 虚拟输出 |                      通常否 |                   通常否 |
+
+---
+
+### 5.3 从是否适合远程桌面看
+
+| 方案             | 远程桌面适合度 | 说明                                            |
+| ---------------- | -------------: | ----------------------------------------------- |
+| VKMS             |             中 | 适合底层实验，但不是产品化虚拟屏接口            |
+| EVDI             |             高 | 用户态可接收显示更新，更接近虚拟显示产品接口    |
+| dummy            |             中 | 适合 X11/VNC，不适合现代 Wayland                |
+| Wayland 虚拟输出 |             高 | 适合 Wayland-native 远程桌面，但依赖 compositor |
+
+---
+
+### 5.4 从维护成本看
+
+| 方案             | 维护成本 | 原因                       |
+| ---------------- | -------: | -------------------------- |
+| VKMS             |       低 | 主线内核已有               |
+| EVDI             |   中到高 | DKMS/内核兼容性/用户态配套 |
+| dummy            |       低 | Xorg 老方案，简单稳定      |
+| Wayland 虚拟输出 |   中到高 | compositor 差异大          |
+
+---
+
+## 6. 选型建议
+
+### 6.1 如果目标是学习 DRM/KMS
+
+优先选择：
+
+```text
+VKMS
+```
+
+理由：
+
+- 主线内核
+- DRM/KMS 概念清晰
+- 适合配合 `modetest`、`drm_info`、IGT 学习
+
+---
+
+### 6.2 如果目标是 X11 headless 桌面
+
+优先选择：
+
+```text
+Xorg dummy
+```
+
+理由：
+
+- 简单
+- 成熟
+- 适合 VNC / xpra / X11 程序
+
+---
+
+### 6.3 如果目标是用户态接收虚拟屏帧
+
+优先选择：
+
+```text
+EVDI
+```
+
+理由：
+
+- 用户态通过 `libevdi` 参与显示管理
+- 更接近虚拟显示产品模型
+- 适合 DisplayLink / 虚拟显示 / 远程显示实验
+
+---
+
+### 6.4 如果目标是现代 Wayland 远程桌面
+
+优先研究：
+
+```text
+compositor virtual output
+```
+
+而不是只盯着内核虚拟显示驱动。
+
+重点方向：
+
+- Weston headless / RDP / VNC backend
+- wlroots headless backend
+- GNOME Remote Desktop
+- KWin remote desktop
+- PipeWire screen capture
+- xdg-desktop-portal
+
+---
+
+## 7. 总结
+
+```text
+VKMS:
+  内核主线 DRM/KMS 虚拟显示，适合测试和学习。
+
+EVDI:
+  DRM 虚拟显示 + 用户态 libevdi，适合虚拟显示产品化和帧接收。
+
+Xorg dummy:
+  Xorg 伪显示驱动，适合传统 X11 headless。
+
+Wayland 虚拟输出:
+  compositor 内部能力，适合现代 Wayland 远程桌面和无头会话。
+```
+
+如果目标是现代 Linux 虚拟显示研究，建议主线是：
+
+```text
+VKMS 理解 DRM/KMS
+  ↓
+EVDI 理解用户态虚拟显示
+  ↓
+Wayland compositor virtual output 理解现代桌面远程输出
+```
+
+---
+
+## 参考资料
+
+- Linux Kernel VKMS documentation: https://www.kernel.org/doc/html/latest/gpu/vkms.html
+- DRM documentation mirror: https://dri.freedesktop.org/docs/drm/gpu/vkms.html
+- EVDI GitHub: https://github.com/DisplayLink/evdi
+- EVDI documentation: https://displaylink.github.io/evdi/
+- Xorg dummy driver package/source: https://gitlab.freedesktop.org/xorg/driver/xf86-video-dummy
+- Weston documentation: https://wayland.pages.freedesktop.org/weston/
+- wlroots project: https://gitlab.freedesktop.org/wlroots/wlroots
