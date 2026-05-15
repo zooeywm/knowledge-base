@@ -1,0 +1,686 @@
+---
+title: "260515"
+description: 内存随记
+---
+
+# Linux / ELF / 虚拟内存 / Arena / RAII 总结
+
+# 一、RAII / Arena / GC
+
+## RAII
+
+RAII（Resource Acquisition Is Initialization）是：
+
+- 对象构造时获取资源
+- 对象析构时释放资源
+
+典型管理：
+
+- fd
+- socket
+- mutex
+- EGLImage
+- GL texture
+- mmap
+
+特点：
+
+- 确定性释放
+- 离开作用域立即 cleanup
+- 特别适合系统资源
+
+---
+
+## Arena
+
+Arena 是一种：
+
+```text
+批量 / 线性内存分配策略
+```
+
+核心思想：
+
+```text
+一次申请大块内存
+后续 bump allocation
+```
+
+例如：
+
+```cpp
+ptr += size;
+```
+
+Arena 的核心优势：
+
+- alloc 极快
+- free 极快（reset）
+- locality 好
+- pointer 稳定
+- 减少 allocator 开销
+
+Arena 通常：
+
+- chunk 内连续
+- chunk 与 chunk 不连续
+- 不支持单对象 free
+- 常见为 non-moving allocator
+
+Arena 的典型结构：
+
+```text
+Arena
+ ├── chunk1
+ ├── chunk2
+ ├── chunk3
+```
+
+Arena 通常：
+
+- 整体 reset
+- 或 chunk recycle
+- 很少支持任意对象 free
+
+---
+
+## Arena 的本质
+
+Arena 不是：
+
+```text
+特殊内存区域
+```
+
+而是：
+
+```text
+一种内存管理策略
+```
+
+Arena 可以基于：
+
+- heap
+- stack
+- mmap
+- static buffer
+- shared memory
+
+实现。
+
+---
+
+## Arena 与 RAII
+
+Arena 与 RAII 不冲突。
+
+典型模式：
+
+- Arena 管临时对象
+- RAII 管系统资源
+
+例如：
+
+```text
+Arena:
+  render node
+  damage region
+  temp matrix
+
+RAII:
+  EGLImage
+  dmabuf fd
+  GL texture
+```
+
+---
+
+## Arena / RAII / GC 可以混合
+
+现代大型系统通常：
+
+```text
+RAII + Arena + GC 混合
+```
+
+例如：
+
+- 浏览器
+- 游戏引擎
+- LLVM
+- JS runtime
+
+常见分工：
+
+| 模型  | 管理内容         |
+| ----- | ---------------- |
+| RAII  | 系统资源         |
+| Arena | 批量 temp object |
+| GC    | object graph     |
+
+---
+
+# 二、Rust String / Vec 内存模型
+
+Rust 的：
+
+```rust
+String
+```
+
+本质：
+
+```rust
+Vec<u8>
+```
+
+布局：
+
+```text
+Stack:
+ ptr
+ len
+ cap
+
+Heap:
+[h][e][l][l][o]
+```
+
+特点：
+
+- String 对象通常在 stack
+- 字符数据通常在 heap
+- Vec 内部元素连续
+- 不同 String 数据通常不连续
+- 扩容可能 realloc
+
+---
+
+## Rust 的连续字符串
+
+### &'static str
+
+字符串字面量：
+
+```rust
+let s = "hello";
+```
+
+数据位于：
+
+```text
+.rodata
+```
+
+---
+
+### ArrayString
+
+小字符串直接内联：
+
+```rust
+ArrayString<32>
+```
+
+对象和数据连续。
+
+---
+
+### Small String Optimization
+
+例如：
+
+- smol_str
+- smartstring
+
+小字符串内联，大字符串 heap。
+
+---
+
+# 三、ELF 基础结构
+
+ELF 是：
+
+```text
+Executable and Linkable Format
+```
+
+不是：
+
+```text
+纯代码文件
+```
+
+而是：
+
+```text
+完整 runtime 容器格式
+```
+
+包含：
+
+- 代码
+- 常量
+- 全局变量
+- 动态链接信息
+- TLS 信息
+- relocation
+- debug metadata
+
+---
+
+## 常见 ELF section
+
+| Section     | 作用                    |
+| ----------- | ----------------------- |
+| .text       | 机器码                  |
+| .rodata     | 常量                    |
+| .data       | 已初始化全局变量        |
+| .bss        | 未初始化全局变量        |
+| .dynamic    | 动态链接 metadata       |
+| .got        | Global Offset Table     |
+| .plt        | Procedure Linkage Table |
+| .dynsym     | 动态符号表              |
+| .dynstr     | 动态字符串              |
+| .tdata      | TLS 初始化数据          |
+| .tbss       | TLS 未初始化数据        |
+| .init_array | constructor             |
+| .fini_array | destructor              |
+
+---
+
+## .text 与 .dynamic
+
+两者：
+
+```text
+不是层级关系
+```
+
+而是：
+
+```text
+ELF 中平级 section
+```
+
+ELF 更像：
+
+```text
+带 offset/index 的二进制容器
+```
+
+不是树状结构。
+
+---
+
+# 四、ELF 启动流程
+
+程序运行：
+
+```bash
+./app
+```
+
+最终：
+
+```text
+shell
+→ execve
+→ kernel ELF loader
+→ ld-linux.so
+→ libc startup
+→ main
+```
+
+---
+
+# 五、Kernel ELF Loader
+
+Linux kernel 内部有：
+
+```text
+ELF binary loader
+```
+
+源码：
+
+```text
+fs/binfmt_elf.c
+```
+
+核心函数：
+
+```text
+load_elf_binary()
+```
+
+负责：
+
+- 解析 ELF header
+- 建立虚拟内存映射
+- 创建 stack
+- 设置 entry point
+- 启动 dynamic linker
+
+---
+
+# 六、Program Header 与 Section
+
+ELF 有两套结构：
+
+| 结构           | 用途            |
+| -------------- | --------------- |
+| Section Header | linker/debugger |
+| Program Header | loader/runtime  |
+
+运行时：
+
+```text
+主要看 Program Header
+```
+
+例如：
+
+```text
+PT_LOAD
+PT_DYNAMIC
+PT_INTERP
+PT_TLS
+```
+
+---
+
+# 七、mmap
+
+mmap 本质：
+
+```text
+虚拟地址 → 文件offset
+```
+
+映射。
+
+动态库和主程序：
+
+```text
+都通过 mmap 加载
+```
+
+不是：
+
+```text
+read 整个 ELF 到 RAM
+```
+
+---
+
+# 八、Demand Paging
+
+程序启动时：
+
+```text
+只建立虚拟地址映射
+```
+
+并不会：
+
+```text
+立即读入所有代码页
+```
+
+真正执行到某页时：
+
+```text
+CPU → MMU → page fault
+```
+
+内核：
+
+```text
+从 ELF 文件按 page 读取
+```
+
+这是：
+
+```text
+demand paging
+```
+
+---
+
+# 九、函数调用与 page fault
+
+不是：
+
+```text
+“按函数加载”
+```
+
+而是：
+
+```text
+按 page 懒加载
+```
+
+流程：
+
+```text
+call foo()
+→ RIP 跳转
+→ MMU 查 page table
+→ present=0
+→ page fault
+→ kernel 根据 mmap/file offset 读取 page
+→ 更新 page table
+→ 恢复执行
+```
+
+关键：
+
+```text
+内核不认识“函数”
+```
+
+只认识：
+
+- virtual address
+- page
+- mmap region
+
+---
+
+# 十、MMU
+
+MMU（Memory Management Unit）是：
+
+```text
+CPU 内部负责：
+虚拟地址 → 物理地址
+转换的硬件
+```
+
+负责：
+
+- page table lookup
+- TLB
+- page permission
+- page fault
+
+现代 OS：
+
+- Linux
+- Windows
+- macOS
+
+都高度依赖 MMU。
+
+---
+
+# 十一、进程虚拟内存布局
+
+典型 Linux：
+
+```text
+高地址
++-------------------+
+| Stack             |
++-------------------+
+| mmap region       |
++-------------------+
+| Heap              |
++-------------------+
+| BSS               |
++-------------------+
+| Data              |
++-------------------+
+| Rodata            |
++-------------------+
+| Text(code)        |
++-------------------+
+低地址
+```
+
+---
+
+# 十二、Stack / Heap / mmap / TLS
+
+## Stack
+
+函数调用栈：
+
+- 局部变量
+- return address
+- saved registers
+
+每线程独立。
+
+---
+
+## Heap
+
+动态分配：
+
+- malloc
+- new
+- String
+- Vec
+
+---
+
+## mmap region
+
+文件映射：
+
+- 动态库
+- executable segment
+- anonymous mmap
+
+---
+
+## TLS
+
+Thread Local Storage：
+
+```cpp
+thread_local int x;
+```
+
+每线程独立副本。
+
+ELF 中：
+
+- .tdata
+- .tbss
+- PT_TLS
+
+描述 TLS。
+
+---
+
+# 十三、动态库
+
+动态库：
+
+```text
+也是完整 ELF
+```
+
+例如：
+
+- libc.so
+- libQt6Core.so
+- libEGL.so
+
+加载后：
+
+```text
+也是 mmap segment
+```
+
+进入：
+
+```text
+进程虚拟地址空间
+```
+
+不是 stack。
+
+---
+
+# 十四、动态链接器
+
+动态 linker：
+
+```text
+ld-linux.so
+```
+
+负责：
+
+- 加载 so
+- relocation
+- symbol resolve
+- TLS setup
+- constructor
+
+动态链接 metadata：
+
+主要来自：
+
+```text
+.dynamic
+```
+
+---
+
+# 十五、机器码与汇编
+
+汇编：
+
+```text
+机器码的人类可读形式
+```
+
+机器码：
+
+```text
+CPU 真正执行的 binary instruction
+```
+
+例如：
+
+```asm
+mov eax, edi
+```
+
+对应：
+
+```text
+89 f8
+```
+
+最终：
+
+```text
+.text 存放的是机器码
+```
