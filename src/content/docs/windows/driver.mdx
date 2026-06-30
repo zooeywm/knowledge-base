@@ -1,0 +1,56 @@
+---
+title: "Windows 驱动 Debug"
+description: "Windows 驱动 Debug"
+tags:
+  - windows
+  - driver
+---
+
+## 查询和关闭 Windows Crash 自动重启
+
+查询：`reg query "HKLM\SYSTEM\CurrentControlSet\Control\CrashControl" /v AutoReboot`
+
+AutoReboot REG_DWORD 0x1 自动重启开启
+
+AutoReboot REG_DWORD 0x0 自动重启关闭
+
+关闭：`reg add "HKLM\SYSTEM\CurrentControlSet\Control\CrashControl" /v AutoReboot /t REG_DWORD /d 0 /f`
+
+## minidump
+
+```
+reg add "HKLM\SYSTEM\CurrentControlSet\Control\CrashControl" /v CrashDumpEnabled /t REG_DWORD /d 3 /f
+reg add "HKLM\SYSTEM\CurrentControlSet\Control\CrashControl" /v MinidumpDir /t REG_EXPAND_SZ /d "%SystemRoot%\Minidump" /f
+mkdir C:\Windows\Minidump
+```
+
+## 开启 driver verifier
+
+`verifier.exe /standard /driver xxx.sys`
+
+重启后 `verifier /query` 验证
+
+## 系统崩溃后进入安全模式终端模式后
+
+将原系统注册表挂载到 PE 安全模式：`reg load HKLM\OFFSYS C:\Windows\System32\Config\SYSTEM`
+
+关闭 driver verifier 模式：`reg delete "HKLM\OFFSYS\ControlSet001\Control\Session Manager\Memory Management" /v VerifyDrivers /f`
+
+然后 wpeutil reboot
+
+## WinDbg 使用方式
+
+```
+.cls
+.symfix C:\symbols
+.sympath+ X:\xxx-symbols
+.sympath
+.reload /f xxx.sys
+!analyze -v
+kv
+kP
+lmvm xxx
+.bugcheck
+!thread
+!verifier 3 xxx.sys
+```
