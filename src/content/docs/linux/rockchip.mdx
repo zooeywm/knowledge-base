@@ -1,0 +1,20 @@
+---
+title: "Rockchip 系列"
+tags:
+  - rockchip
+  - linux
+---
+
+# 解码占用查看方式
+
+```shell
+sudo su
+echo 100 > /proc/mpp_service/load_interval
+watch -n 0.5 cat /proc/mpp_service/load
+```
+
+恢复：
+
+```shell
+echo 0 > /proc/mpp_service/load_interval
+```
