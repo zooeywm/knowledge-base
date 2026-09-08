@@ -18,6 +18,7 @@ export default defineConfig({
         { label: "Linux", autogenerate: { directory: "linux" } },
         { label: "Windows", autogenerate: { directory: "windows" } },
         { label: "项目", autogenerate: { directory: "projects" } },
+        { label: "镜像源", autogenerate: { directory: "mirrors" } },
       ],
       locales: {
         root: {

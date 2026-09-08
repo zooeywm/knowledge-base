@@ -1,0 +1,147 @@
+---
+title: 镜像源清单
+---
+
+## podman
+
+```
+sudo mkdir -p /etc/containers/registries.conf.d
+
+sudo tee /etc/containers/registries.conf.d/docker-mirror.conf >/dev/null <<'EOF'
+[[registry]]
+prefix = "docker.io"
+location = "docker.io"
+
+[[registry.mirror]]
+location = "docker.m.daocloud.io"
+EOF
+```
+
+## github
+
+```
+git config --global url."https://ghfast.top/https://github.com/".insteadOf "https://github.com/"
+```
+
+取消：
+
+```
+git config --global --unset-all \
+url."https://ghfast.top/https://github.com/".insteadOf
+```
+
+## ubuntu 26.04
+
+```
+sudo cp /etc/apt/sources.list.d/ubuntu.sources \
+  /etc/apt/sources.list.d/ubuntu.sources.bak
+
+sudo tee /etc/apt/sources.list.d/ubuntu.sources > /dev/null <<'EOF'
+Types: deb
+URIs: https://mirrors.tuna.tsinghua.edu.cn/ubuntu
+Suites: resolute resolute-updates resolute-backports
+Components: main restricted universe multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+
+Types: deb
+URIs: http://security.ubuntu.com/ubuntu/
+Suites: resolute-security
+Components: main restricted universe multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+EOF
+
+sudo apt update
+cat /etc/apt/sources.list.d/ubuntu.sources
+```
+
+恢复：
+
+```
+sudo cp /etc/apt/sources.list.d/ubuntu.sources.bak \
+  /etc/apt/sources.list.d/ubuntu.sources
+sudo apt update
+```
+
+## python uv
+
+测阿里延迟
+
+```
+curl -L -o /dev/null \
+  -w 'speed=%{speed_download} bytes/s total=%{time_total}s\n' \
+  https://mirrors.aliyun.com/pypi/packages/source/n/numpy/numpy-2.3.3.tar.gz
+```
+
+测清华延迟
+
+```
+curl -L -o /dev/null \
+  -w 'speed=%{speed_download} bytes/s total=%{time_total}s\n' \
+  https://pypi.tuna.tsinghua.edu.cn/packages/source/n/numpy/numpy-2.3.3.tar.gz
+```
+
+哪个快用哪个，下面的代码里是用的阿里，想换成清华或华为就把第一条命令换成：
+
+```
+echo 'export UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple' >> ~/.bashrc
+或
+echo 'export UV_DEFAULT_INDEX=https://repo.huaweicloud.com/repository/pypi/simple/' >> ~/.bashrc
+
+```
+
+```
+echo 'export UV_DEFAULT_INDEX=https://mirrors.aliyun.com/pypi/simple/' >> ~/.bashrc
+echo 'export UV_PYTHON_INSTALL_MIRROR=https://ghfast.top/https://github.com/astral-sh/python-build-standalone/releases/download' >> ~/.bashrc
+source ~/.bashrc
+```
+
+有的项目会写死 uv 使用的源，需要用 --default-index 覆盖
+
+```
+uv pip install \
+  --python .venv/bin/python \
+  --default-index https://pypi.tuna.tsinghua.edu.cn/simple \
+  -e "python[diffusion]" \
+  --prerelease=allow
+```
+
+## huggingface
+
+hf:
+
+```
+echo 'export HF_ENDPOINT=https://hf-mirror.com' >> ~/.bashrc
+source ~/.bashrc
+```
+
+另外，建议使用 hfd 下载会更快
+
+## rust
+
+下载 rustup 镜像：
+
+```
+cat >> ~/.bashrc <<'EOF'
+export RUSTUP_DIST_SERVER=https://rsproxy.cn
+export RUSTUP_UPDATE_ROOT=https://rsproxy.cn/rustup
+EOF
+
+curl --proto '=https' --tlsv1.2 -sSf https://rsproxy.cn/rustup-init.sh | sh
+```
+
+cargo config
+
+```
+mkdir -p ~/.carg config
+
+cat > ~/.cargo/config.toml <<'EOF'
+[source.crates-io]
+replace-with = "rsproxy-sparse"
+
+[source.rsproxy-sparse]
+registry = "sparse+https://rsproxy.cn/index/"
+
+[registries.rsproxy]
+index = "https://rsproxy.cn/crates.io-index"
+EOF
+```
