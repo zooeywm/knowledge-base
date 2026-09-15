@@ -12,6 +12,7 @@ export default defineConfig({
       title: "zooeywm 知识库",
       social: [{ icon: "github", label: "GitHub", href: "https://github.com/zooeywm" }],
       sidebar: [
+        { label: "信号与系统", autogenerate: { directory: "signals-and-systems" } },
         { label: "杂项", autogenerate: { directory: "misc" } },
         { label: "编程语言", autogenerate: { directory: "languages" } },
         { label: "安卓", autogenerate: { directory: "android" } },

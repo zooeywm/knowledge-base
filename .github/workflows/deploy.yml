@@ -20,6 +20,21 @@ jobs:
       - name: Install D2
         run: curl -fsSL https://d2lang.com/install.sh | sh -s --
 
+      - name: Install Typst
+        uses: typst-community/setup-typst@v5
+        with:
+          typst-version: ^0.14.0
+
+      - name: Install Chinese fonts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fonts-noto-cjk
+
+      - name: Compile Typst notes
+        run: |
+          mkdir -p public/notes
+          typst compile notes/signals-and-systems/main.typ public/notes/signals-and-systems.pdf
+
       - name: Install, build, and upload your site output
         uses: withastro/action@v2
         with:
