@@ -70,7 +70,7 @@ $ H(f) = cal(F) {h(t)} $
 
 因此：
 
-$ h(t) longleftrightarrow H(f) $
+$ h(t) arrow.l.r H(f) $
 
 它们描述的是同一个 LTI 系统，只是观察角度不同。
 
@@ -99,7 +99,7 @@ $ Y(f) = X(f) H(f) $
 
 因此：
 
-$ x ast h longleftrightarrow X H $
+$ x ast h arrow.l.r X H $
 
 也就是说：
 

@@ -92,7 +92,7 @@ $ P = (r cos(theta), r sin(theta)) $
 
 $ P = (cos(theta), sin(theta)) $
 
-复数 $a+bi$ 对应二维坐标 $(a,b)$，所以单位圆上的同一个点也可以写成：
+复数 $a + b i$ 对应二维坐标 $(a,b)$，所以单位圆上的同一个点也可以写成：
 
 $ cos(theta) + i sin(theta) $
 
