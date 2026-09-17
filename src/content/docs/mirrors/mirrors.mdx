@@ -20,14 +20,14 @@ EOF
 ## github
 
 ```
-git config --global url."https://ghfast.top/https://github.com/".insteadOf "https://github.com/"
+git config --global url."https://v4.gh-proxy.org/https://github.com/".insteadOf "https://github.com/"
 ```
 
 取消：
 
 ```
 git config --global --unset-all \
-url."https://ghfast.top/https://github.com/".insteadOf
+url."https://v4.gh-proxy.org/https://github.com/".insteadOf
 ```
 
 ## ubuntu 26.04
@@ -91,7 +91,7 @@ echo 'export UV_DEFAULT_INDEX=https://repo.huaweicloud.com/repository/pypi/simpl
 
 ```
 echo 'export UV_DEFAULT_INDEX=https://mirrors.aliyun.com/pypi/simple/' >> ~/.bashrc
-echo 'export UV_PYTHON_INSTALL_MIRROR=https://ghfast.top/https://github.com/astral-sh/python-build-standalone/releases/download' >> ~/.bashrc
+echo 'export UV_PYTHON_INSTALL_MIRROR=https://v4.gh-proxy.org/https://github.com/astral-sh/python-build-standalone/releases/download' >> ~/.bashrc
 source ~/.bashrc
 ```
 
