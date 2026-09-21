@@ -114,7 +114,41 @@ echo 'export HF_ENDPOINT=https://hf-mirror.com' >> ~/.bashrc
 source ~/.bashrc
 ```
 
-另外，建议使用 hfd 下载会更快
+下载用 `hfd`（自带进度、断点续传，中断后**重跑即续传**）。
+
+**`hfd` 的默认下载器是 `aria2c`（多连接）。** 机器上要先有这个包，否则会退回单连接的
+`wget`，速度差一个数量级：
+
+```
+sudo apt-get install -y aria2
+```
+
+实测同一个源（`hf-mirror.com`）下 34 GB 的权重：
+
+| 下载器 | 速度 | 34 GB 需要 |
+| --- | --- | --- |
+| `wget`（单连接） | 10–25 MB/s | 约 40 分钟 |
+| `aria2c -x 4`（`hfd` 默认） | **80+ MB/s** | 几分钟 |
+
+**另一个坑：不加 `--include` 会把整个仓库拉下来。** `hfd` 会先把仓库体积报出来——例如
+`Comfy-Org/MiniMax-H3` 是 **480 GB**。只取其中一两个文件要写全仓库内的相对路径：
+
+```
+hfd Comfy-Org/MiniMax-H3 \
+    --include "diffusion_models/minimax_h3_fl2va_int8_convrot.safetensors" \
+    --local-dir /opt/orbis/models
+```
+
+`--local-dir` 下保持仓库内的相对路径，所以这行命令落地的是
+`/opt/orbis/models/diffusion_models/minimax_h3_fl2va_int8_convrot.safetensors`——正好是
+ComfyUI 认的目录结构，不用再手动搬。
+
+**下完核对 sha256。** 远程头的 `x-linked-etag` 就是 LFS 文件的 sha256：
+
+```
+curl -sIL https://hf-mirror.com/<org>/<repo>/resolve/main/<文件路径> | grep -iE "x-linked-(etag|size)"
+sha256sum <本地文件>
+```
 
 ## rust
 
